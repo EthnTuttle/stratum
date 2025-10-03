@@ -2,193 +2,186 @@
 
 ## Overview
 
-This design integrates Iroh peer-to-peer networking as an alternative transport layer for Stratum V2 connections. The integration follows the existing network abstraction patterns in the codebase, adding Iroh support alongside TCP while maintaining full compatibility with existing channel management logic.
+This design integrates Iroh peer-to-peer networking as an alternative transport layer for Stratum V2 connections by extending the network-helpers crate. Iroh replaces TCP at the transport layer while maintaining full compatibility with existing channel management logic and providing the same connection interfaces.
 
-The design leverages Iroh's built-in NAT traversal, content-addressed networking, and peer discovery capabilities to enable mining connections in environments where direct TCP connections are not feasible. Based on Iroh's protocol examples and the iroh-roq implementation (https://github.com/n0-computer/iroh-roq), we'll use a hybrid approach:
+The key insight is that Iroh serves as a drop-in replacement for TcpStream, allowing us to maintain the existing layered architecture:
+- **NoiseIrohStream**: Equivalent to NoiseTcpStream but using Iroh transport
+- **IrohConnection**: Equivalent to Connection but using NoiseIrohStream
+- **PlainIrohConnection**: Equivalent to PlainConnection but using Iroh directly
 
-1. **RPC Pattern**: For control messages (job assignments, channel setup, status updates) using Iroh's RPC-style bidirectional communication
-2. **Streaming Pattern**: For high-frequency data flows (share submissions, new work notifications) using Iroh's efficient streaming capabilities similar to iroh-roq's approach for handling large data volumes
-
-This dual approach optimizes for both the request-response semantics needed for Stratum V2 control flow and the high-throughput requirements of mining data streams.
-
-The integration is implemented as an optional feature that extends the existing network-helpers abstraction layer.
+All connection types return the same `(Receiver<StandardEitherFrame<Message>>, Sender<StandardEitherFrame<Message>>)` interface, ensuring zero changes are needed in channels-sv2 or any higher-level code.
 
 ## Architecture
 
-### High-Level Architecture
+### Transport Layer Replacement
 
 ```mermaid
 graph TB
-    subgraph "Application Layer"
-        CM[Channel Manager]
-        JD[Job Declarator]
-        TR[Template Receiver]
+    subgraph "Channel Layer"
+        CHAN[All Channels<br/>ExtendedChannel, StandardChannel, GroupChannel]
     end
     
-    subgraph "Network Abstraction Layer"
-        NH[Network Helpers]
-        NC[Noise Connection]
-        PC[Plain Connection]
-        IC[Iroh Connection]
+    subgraph "Network Helpers Layer"
+        NC[Connection::new<br/>TCP + Noise]
+        PC[PlainConnection::new<br/>Plain TCP]
+        IC[IrohConnection::new<br/>Iroh + Noise]
+        PIC[PlainIrohConnection::new<br/>Plain Iroh]
+    end
+    
+    subgraph "Stream Layer"
+        NTS[NoiseTcpStream]
+        NIS[NoiseIrohStream]
     end
     
     subgraph "Transport Layer"
-        TCP[TCP Stream]
-        IROH[Iroh Stream]
+        TCP[TcpStream]
+        IROH[Iroh BiStream]
     end
     
-    CM --> NH
-    JD --> NH
-    TR --> NH
+    CHAN --> NC
+    CHAN --> PC
+    CHAN --> IC
+    CHAN --> PIC
     
-    NH --> NC
-    NH --> PC
-    NH --> IC
-    
-    NC --> TCP
+    NC --> NTS
+    IC --> NIS
     PC --> TCP
-    IC --> IROH
+    PIC --> IROH
+    
+    NTS --> TCP
+    NIS --> IROH
 ```
 
-### Integration Points
+### Key Design Principles
 
-The Iroh integration extends the existing network-helpers crate with new connection types that implement the same interfaces as TCP-based connections. This ensures that higher-level channel management code remains unchanged.
+1. **Transport Replacement**: Iroh replaces TcpStream at the lowest level
+2. **Interface Compatibility**: All connection types return identical interfaces
+3. **Zero Channel Changes**: Existing channel logic remains completely unchanged
+4. **Encryption Support**: Noise encryption works over both TCP and Iroh
+5. **Transport Selection**: Roles choose transport through connection constructor selection
 
-Key integration points:
-- **network-helpers crate**: Add `iroh_connection.rs` and `iroh_stream.rs` modules
-- **channels-sv2 crate**: No direct changes needed - uses network-helpers abstractions
-- **Configuration**: Extend existing config structures to support Iroh transport options
-- **Feature flags**: Add `iroh` feature to make integration optional
+## Components
 
-## Components and Interfaces
+### NoiseIrohStream
 
-### IrohStream Component
-
-Following Iroh's hybrid approach inspired by iroh-roq for high-throughput data streaming:
+Equivalent to NoiseTcpStream but using Iroh as the transport layer:
 
 ```rust
-pub struct IrohStream<Message> {
-    // Control channel for RPC-style messages (setup, status, etc.)
-    rpc_client: iroh::rpc::RpcClient<StratumV2RpcProtocol>,
-    // High-throughput streaming for mining data
-    data_stream: iroh::stream::BiStream,
-    reader: IrohReadHalf<Message>,
-    writer: IrohWriteHalf<Message>,
+// roles/roles-utils/network-helpers/src/iroh_stream.rs
+
+pub struct NoiseIrohStream<Message> {
+    reader: NoiseIrohReadHalf<Message>,
+    writer: NoiseIrohWriteHalf<Message>,
 }
 
-impl<Message> IrohStream<Message> 
-where 
-    Message: Serialize + Deserialize<'static> + GetSize + Send + 'static,
-{
+pub struct NoiseIrohReadHalf<Message> {
+    reader: iroh::endpoint::RecvStream,  // Instead of OwnedReadHalf
+    decoder: StandardNoiseDecoder<Message>,
+    state: State,
+    current_frame_buf: Vec<u8>,
+    bytes_read: usize,
+}
+
+pub struct NoiseIrohWriteHalf<Message> {
+    writer: iroh::endpoint::SendStream,  // Instead of OwnedWriteHalf
+    encoder: NoiseEncoder<Message>,
+    state: State,
+}
+
+impl<Message> NoiseIrohStream<Message> {
     pub async fn new(
-        node: &iroh::Node,
+        iroh_node: Arc<iroh::Node>,
         peer_id: iroh::NodeId,
         alpn: &[u8],
-    ) -> Result<Self, Error>;
-    
-    pub fn into_split(self) -> (IrohReadHalf<Message>, IrohWriteHalf<Message>);
-}
-
-// RPC protocol for control messages
-pub struct StratumV2RpcProtocol;
-
-impl iroh::protocol::Protocol for StratumV2RpcProtocol {
-    type Request = ControlMessage;
-    type Response = ControlResponse;
-}
-
-// Streaming protocol for high-frequency mining data
-pub struct StratumV2StreamProtocol;
-
-impl iroh::protocol::Protocol for StratumV2StreamProtocol {
-    type Request = MiningDataFrame;
-    type Response = ();
+        role: HandshakeRole,
+    ) -> Result<Self, Error> {
+        // 1. Establish Iroh connection
+        let conn = iroh_node.endpoint().connect(peer_id, alpn).await?;
+        let (send_stream, recv_stream) = conn.open_bi().await?;
+        
+        // 2. Perform same Noise handshake as NoiseTcpStream
+        // (identical logic, just over Iroh streams instead of TCP)
+    }
 }
 ```
 
-### IrohConnection Component
+### IrohConnection
 
-Using Iroh's dual-channel approach inspired by iroh-roq for optimal mining data flow:
+Equivalent to noise_connection.rs but using NoiseIrohStream:
 
 ```rust
-pub struct IrohConnection {
-    // Unified receiver for both control and data messages
-    receiver: Receiver<StandardEitherFrame<Message>>,
-    // Separate senders for different message types
-    control_sender: Sender<ControlMessage>,
-    data_sender: Sender<MiningDataFrame>,
-}
+// roles/roles-utils/network-helpers/src/iroh_connection.rs
+
+pub struct IrohConnection;
 
 impl IrohConnection {
     pub async fn new<Message>(
-        node: &iroh::Node,
+        iroh_node: Arc<iroh::Node>,
         peer_id: iroh::NodeId,
         alpn: &[u8],
-    ) -> Result<(
-        Receiver<StandardEitherFrame<Message>>,
-        Sender<StandardEitherFrame<Message>>,
-    ), Error>;
-}
+        role: HandshakeRole,
+    ) -> Result<
+        (
+            Receiver<StandardEitherFrame<Message>>,
+            Sender<StandardEitherFrame<Message>>,
+        ),
+        Error,
+    > {
+        // Same pattern as Connection::new but using NoiseIrohStream
+        let (sender_incoming, receiver_incoming) = unbounded();
+        let (sender_outgoing, receiver_outgoing) = unbounded();
 
-// Handler for RPC-style control messages
-pub struct StratumV2RpcHandler {
-    control_sender: Sender<ControlMessage>,
-}
+        let (read_half, write_half) = NoiseIrohStream::<Message>::new(
+            iroh_node, peer_id, alpn, role
+        ).await?.into_split();
 
-impl iroh::protocol::Handler for StratumV2RpcHandler {
-    type Protocol = StratumV2RpcProtocol;
-    
-    async fn handle(&self, request: ControlMessage) -> Result<ControlResponse, Error> {
-        // Handle channel setup, status queries, etc.
-        match request {
-            ControlMessage::SetupChannel(setup) => {
-                // Process channel setup
-                Ok(ControlResponse::ChannelSetup(response))
-            }
-            // ... other control messages
-        }
-    }
-}
+        // Same spawn_reader/spawn_writer pattern as noise_connection.rs
+        Self::spawn_reader(read_half, /* ... */);
+        Self::spawn_writer(write_half, /* ... */);
 
-// Handler for high-throughput mining data streams
-pub struct StratumV2StreamHandler {
-    data_sender: Sender<MiningDataFrame>,
-}
-
-impl iroh::protocol::Handler for StratumV2StreamHandler {
-    type Protocol = StratumV2StreamProtocol;
-    
-    async fn handle(&self, data: MiningDataFrame) -> Result<(), Error> {
-        // Forward mining data (shares, jobs, etc.) with minimal processing
-        self.data_sender.send(data).await?;
-        Ok(())
+        Ok((receiver_incoming, sender_outgoing))
     }
 }
 ```
 
-### Configuration Extensions
+### PlainIrohConnection
+
+Equivalent to plain_connection.rs but using Iroh directly:
 
 ```rust
-#[derive(Debug, Clone)]
-pub enum TransportConfig {
-    Tcp {
-        address: String,
-    },
-    #[cfg(feature = "iroh")]
-    Iroh {
-        node_config: IrohNodeConfig,
-        peer_id: Option<iroh::NodeId>,
-        alpn: Vec<u8>,
-    },
-    #[cfg(feature = "iroh")]
-    Dual {
-        tcp: String,
-        iroh: IrohNodeConfig,
-        alpn: Vec<u8>,
-    },
-}
+// roles/roles-utils/network-helpers/src/plain_iroh_connection.rs
 
-#[cfg(feature = "iroh")]
+pub struct PlainIrohConnection;
+
+impl PlainIrohConnection {
+    pub async fn new<Message>(
+        iroh_node: Arc<iroh::Node>,
+        peer_id: iroh::NodeId,
+        alpn: &[u8],
+    ) -> Result<
+        (
+            Receiver<StandardEitherFrame<Message>>,
+            Sender<StandardEitherFrame<Message>>,
+        ),
+        Error,
+    > {
+        // Establish Iroh connection
+        let conn = iroh_node.endpoint().connect(peer_id, alpn).await?;
+        let (send_stream, recv_stream) = conn.open_bi().await?;
+        
+        // Same async task pattern as plain_connection.rs
+        // but using Iroh streams instead of TCP
+    }
+}
+```
+
+### IrohNodeManager
+
+Manages Iroh node lifecycle and configuration:
+
+```rust
+// roles/roles-utils/network-helpers/src/iroh_node.rs
+
 #[derive(Debug, Clone)]
 pub struct IrohNodeConfig {
     pub storage_path: Option<PathBuf>,
@@ -196,27 +189,7 @@ pub struct IrohNodeConfig {
     pub stun_servers: Vec<String>,
     pub bind_port: Option<u16>,
 }
-```
 
-### Unified Connection Interface
-
-All connection types implement a common trait to ensure consistent behavior:
-
-```rust
-pub trait NetworkConnection<Message> {
-    type ReadHalf: AsyncRead + Send + 'static;
-    type WriteHalf: AsyncWrite + Send + 'static;
-    
-    async fn establish(config: &TransportConfig) -> Result<Self, Error>;
-    fn into_split(self) -> (Self::ReadHalf, Self::WriteHalf);
-}
-```
-
-## Data Models
-
-### Iroh Node Management
-
-```rust
 pub struct IrohNodeManager {
     node: Arc<iroh::Node>,
     config: IrohNodeConfig,
@@ -224,41 +197,115 @@ pub struct IrohNodeManager {
 
 impl IrohNodeManager {
     pub async fn new(config: IrohNodeConfig) -> Result<Self, Error>;
-    pub fn node(&self) -> &iroh::Node;
+    pub fn node(&self) -> &Arc<iroh::Node>;
     pub fn node_id(&self) -> iroh::NodeId;
-    pub async fn listen(&self, alpn: &[u8]) -> Result<IrohListener, Error>;
-    pub async fn connect(&self, peer_id: iroh::NodeId, alpn: &[u8]) -> Result<IrohStream, Error>;
+    
+    // Server-side: accept incoming connections
+    pub async fn accept_connection<Message>(
+        &self,
+        alpn: &[u8],
+    ) -> Result<
+        (
+            Receiver<StandardEitherFrame<Message>>,
+            Sender<StandardEitherFrame<Message>>,
+        ),
+        Error,
+    >;
 }
 ```
 
-### Connection Metadata
+## Transport Selection Matrix
+
+| Connection Type | Transport | Encryption | Interface |
+|----------------|-----------|------------|-----------|
+| `Connection::new()` | TCP | Noise | `(Receiver, Sender)` |
+| `PlainConnection::new()` | TCP | None | `(Receiver, Sender)` |
+| `IrohConnection::new()` | Iroh | Noise | `(Receiver, Sender)` |
+| `PlainIrohConnection::new()` | Iroh | None | `(Receiver, Sender)` |
+
+## Usage Patterns
+
+### In Roles
+
+Roles choose transport by selecting the appropriate connection constructor:
 
 ```rust
-#[derive(Debug, Clone)]
-pub struct ConnectionInfo {
-    pub transport: TransportType,
-    pub peer_info: PeerInfo,
-    pub established_at: std::time::Instant,
+// Pool accepting TCP connections (existing)
+let (receiver, sender) = Connection::new(tcp_stream, handshake_role).await?;
+
+// Pool accepting Iroh connections (new)
+let (receiver, sender) = IrohConnection::new(iroh_node, peer_id, alpn, handshake_role).await?;
+
+// Both return identical interfaces - existing channel logic unchanged
+let downstream = Downstream::new(receiver, sender, /* ... */);
+```
+
+### Client-Side Configuration-Based Selection
+
+```rust
+// Client establishing outbound connection (e.g., JD Client to JD Server)
+match upstream_config {
+    UpstreamConfig::Tcp { address } => {
+        let stream = TcpStream::connect(address).await?;
+        Connection::new(stream, role).await?
+    }
+    UpstreamConfig::Iroh { node_config, peer_id, alpn } => {
+        let node_manager = IrohNodeManager::new(node_config).await?;
+        IrohConnection::new(node_manager.node(), peer_id, &alpn, role).await?
+    }
+    UpstreamConfig::IrohWithTcpFallback { iroh_config, tcp_config } => {
+        // Try Iroh first, fallback to TCP on failure
+        establish_connection_with_fallback(iroh_config, tcp_config).await?
+    }
+}
+```
+
+### Server-Side Dual Transport Support
+
+Servers can listen on both TCP and Iroh simultaneously (no fallback):
+
+```rust
+// Pool supporting both TCP and Iroh simultaneously
+async fn start_pool_server(config: &PoolConfig) {
+    // TCP listener (if configured)
+    if let Some(tcp_config) = &config.tcp {
+        tokio::spawn(async move {
+            let tcp_listener = TcpListener::bind(&tcp_config.address).await?;
+            loop {
+                let (stream, _) = tcp_listener.accept().await?;
+                let (receiver, sender) = Connection::new(stream, role).await?;
+                handle_downstream(receiver, sender).await;
+            }
+        });
+    }
+
+    // Iroh listener (if configured) - independent of TCP
+    if let Some(iroh_config) = &config.iroh {
+        tokio::spawn(async move {
+            let node_manager = IrohNodeManager::new(iroh_config.clone()).await?;
+            loop {
+                let (receiver, sender) = node_manager
+                    .accept_connection(&iroh_config.alpn).await?;
+                handle_downstream(receiver, sender).await;
+            }
+        });
+    }
 }
 
-#[derive(Debug, Clone)]
-pub enum TransportType {
-    Tcp { remote_addr: SocketAddr },
-    #[cfg(feature = "iroh")]
-    Iroh { peer_id: iroh::NodeId, relay_url: Option<String> },
-}
-
-#[derive(Debug, Clone)]
-pub enum PeerInfo {
-    Tcp { addr: SocketAddr },
-    #[cfg(feature = "iroh")]
-    Iroh { node_id: iroh::NodeId, addrs: Vec<SocketAddr> },
+// Same downstream handling function works for both transports
+async fn handle_downstream(
+    receiver: Receiver<StandardEitherFrame<Message>>,
+    sender: Sender<StandardEitherFrame<Message>>,
+) {
+    // Identical logic regardless of transport
+    let downstream = Downstream::new(receiver, sender, /* ... */);
+    // ... rest of downstream handling
 }
 ```
 
 ## Error Handling
 
-### Error Types
+### Iroh-Specific Errors
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -278,58 +325,69 @@ pub enum IrohError {
         peer_id: iroh::NodeId,
         reason: String,
     },
-    
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
-    
-    #[error("ALPN protocol mismatch: expected {expected}, got {actual}")]
-    AlpnMismatch { expected: String, actual: String },
 }
 ```
 
-### Error Recovery Strategies
+### Client-Side Transport Fallback
 
-1. **Connection Failures**: Implement exponential backoff with jitter for reconnection attempts
-2. **Peer Discovery Failures**: Fall back to configured relay servers and bootstrap nodes
-3. **Node Initialization Failures**: Validate configuration early and provide actionable error messages
-4. **Transport Fallback**: When dual transport is configured, automatically fall back to TCP if Iroh fails
+Fallback only applies to clients establishing outbound connections:
 
-## Testing Strategy
+```rust
+// Client-side connection with fallback (e.g., JD Client connecting to JD Server)
+async fn establish_upstream_connection(config: &ClientConfig) -> Result<Connection, Error> {
+    // Try Iroh first if configured
+    if let Some(iroh_config) = &config.iroh {
+        match IrohConnection::new(
+            iroh_node, 
+            iroh_config.peer_id, 
+            &iroh_config.alpn, 
+            role
+        ).await {
+            Ok(conn) => return Ok(conn),
+            Err(e) => {
+                warn!("Iroh connection failed, falling back to TCP: {}", e);
+            }
+        }
+    }
+    
+    // Fallback to TCP
+    let stream = TcpStream::connect(&config.tcp_address).await?;
+    Connection::new(stream, role).await
+}
 
-### Unit Tests
+// Server-side: No fallback - servers listen on configured transports
+async fn start_server_listeners(config: &ServerConfig) {
+    // TCP listener (if configured)
+    if let Some(tcp_config) = &config.tcp {
+        tokio::spawn(accept_tcp_connections(tcp_config));
+    }
+    
+    // Iroh listener (if configured) - separate from TCP, no fallback
+    if let Some(iroh_config) = &config.iroh {
+        tokio::spawn(accept_iroh_connections(iroh_config));
+    }
+}
+```
 
-1. **IrohStream Tests**
-   - Message serialization/deserialization over Iroh streams
-   - Connection establishment and teardown
-   - Error handling for various failure scenarios
+## Implementation Strategy
 
-2. **IrohConnection Tests**
-   - Bidirectional message flow
-   - Connection multiplexing
-   - Graceful shutdown handling
+### Phase 1: Core Iroh Transport
+1. Add Iroh dependencies to network-helpers
+2. Implement NoiseIrohStream (equivalent to NoiseTcpStream)
+3. Implement IrohConnection (equivalent to Connection)
+4. Implement PlainIrohConnection (equivalent to PlainConnection)
 
-3. **Configuration Tests**
-   - Valid and invalid configuration parsing
-   - Feature flag behavior
-   - Transport selection logic
+### Phase 2: Node Management
+1. Implement IrohNodeManager for node lifecycle
+2. Add server-side connection acceptance
+3. Add configuration validation and error handling
 
-## Implementation Phases
+### Phase 3: Role Integration
+1. Update role configurations to support Iroh transport
+2. Update roles to use Iroh connections when configured
+3. Add dual transport support (TCP + Iroh simultaneously)
 
-### Phase 1: Core Iroh Integration
-- Add Iroh dependencies with feature flag
-- Implement basic IrohStream and IrohConnection
-- Add configuration structures
-- Basic unit tests
-
-### Phase 2: Network Helpers Integration
-- Extend network-helpers with Iroh support
-- Implement unified connection interface
-- Add error handling and logging
-- Integration tests with existing components
-
-### Phase 3: Advanced Features
-- Dual transport support (TCP + Iroh simultaneously)
-- Connection pooling and management
-
-### Phase 4: Production Readiness
-- Documentation and examples
+### Phase 4: Production Features
+1. Add comprehensive error handling and logging
+2. Add transport fallback mechanisms
+3. Create configuration examples and documentation
