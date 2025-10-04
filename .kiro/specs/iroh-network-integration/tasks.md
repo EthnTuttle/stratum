@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Add Iroh dependencies to network-helpers
+- [x] 1. Add Iroh dependencies to network-helpers
   - Add Iroh dependencies to network-helpers Cargo.toml as regular dependencies
   - Create IrohNodeConfig and IrohNodeManager structures
   - Add Iroh-specific error types to network-helpers Error enum
