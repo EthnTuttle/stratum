@@ -6,23 +6,24 @@
   - Add Iroh-specific error types to network-helpers Error enum
   - _Requirements: 3.1, 3.2, 7.1_
 
-- [ ] 2. Implement NoiseIrohStream (equivalent to NoiseTcpStream)
-  - [ ] 2.1 Create NoiseIrohStream struct with Iroh transport
+- [x] 2. Implement NoiseIrohStream (equivalent to NoiseTcpStream)
+  - [x] 2.1 Create NoiseIrohStream struct with Iroh transport
     - Implement NoiseIrohReadHalf using iroh::endpoint::RecvStream
     - Implement NoiseIrohWriteHalf using iroh::endpoint::SendStream
     - Replace TcpStream usage with Iroh BiStream connections
     - _Requirements: 8.1, 8.2, 8.3_
-  
-  - [ ] 2.2 Implement Noise handshake over Iroh streams
+
+  - [x] 2.2 Implement Noise handshake over Iroh streams
     - Port existing Noise handshake logic from NoiseTcpStream
     - Ensure same handshake process works over Iroh transport
     - Maintain identical encryption and authentication guarantees
     - _Requirements: 8.1, 8.2, 8.4_
-  
-  - [ ]* 2.3 Write unit tests for NoiseIrohStream
+
+  - [x]* 2.3 Write unit tests for NoiseIrohStream
     - Test Noise handshake over Iroh connections
     - Test message encryption/decryption over Iroh
     - Test error handling for Iroh connection failures
+    - Tests implemented with graceful skip when Iroh discovery not configured
     - _Requirements: 8.1, 8.3_
 
 - [ ] 3. Implement IrohConnection (equivalent to noise_connection.rs)

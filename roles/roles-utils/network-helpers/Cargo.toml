@@ -30,6 +30,10 @@ serde_json = { version = "1.0.138", default-features = false, optional = true }
 # Iroh dependencies
 iroh = "0.92.0"
 
+[dev-dependencies]
+rand = "0.8"
+secp256k1 = { version = "0.28.2", features = ["rand"] }
+
 [features]
 default = ["async-channel", "codec_sv2"]
 with_buffer_pool = ["codec_sv2/with_buffer_pool"]
