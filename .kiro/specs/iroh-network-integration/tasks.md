@@ -26,20 +26,20 @@
     - Tests implemented with graceful skip when Iroh discovery not configured
     - _Requirements: 8.1, 8.3_
 
-- [ ] 3. Implement IrohConnection (equivalent to noise_connection.rs)
-  - [ ] 3.1 Create IrohConnection with same interface as Connection
+- [x] 3. Implement IrohConnection (equivalent to noise_connection.rs)
+  - [x] 3.1 Create IrohConnection with same interface as Connection
     - Implement IrohConnection::new() returning (Receiver, Sender) interface
     - Use NoiseIrohStream instead of NoiseTcpStream internally
     - Follow same async task spawning pattern as noise_connection.rs
     - _Requirements: 3.2, 3.3, 4.1_
-  
-  - [ ] 3.2 Implement spawn_reader and spawn_writer for Iroh
+
+  - [x] 3.2 Implement spawn_reader and spawn_writer for Iroh
     - Port reader/writer task logic from noise_connection.rs
     - Adapt for NoiseIrohReadHalf and NoiseIrohWriteHalf
     - Maintain same message handling and error recovery
     - _Requirements: 4.2, 4.3_
-  
-  - [ ]* 3.3 Write unit tests for IrohConnection
+
+  - [x]* 3.3 Write unit tests for IrohConnection
     - Test bidirectional message flow over Iroh
     - Test connection establishment and teardown
     - Test interface compatibility with existing Connection
