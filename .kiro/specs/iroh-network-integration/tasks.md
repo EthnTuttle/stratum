@@ -45,20 +45,20 @@
     - Test interface compatibility with existing Connection
     - _Requirements: 3.2, 4.1, 4.2_
 
-- [ ] 4. Implement PlainIrohConnection (equivalent to plain_connection.rs)
-  - [ ] 4.1 Create PlainIrohConnection for unencrypted Iroh
+- [x] 4. Implement PlainIrohConnection (equivalent to plain_connection.rs)
+  - [x] 4.1 Create PlainIrohConnection for unencrypted Iroh
     - Implement PlainIrohConnection::new() with same interface
     - Use Iroh BiStream directly without Noise encryption
     - Follow same async task pattern as plain_connection.rs
     - _Requirements: 2.3, 3.2, 4.1_
-  
-  - [ ] 4.2 Implement message handling over plain Iroh
+
+  - [x] 4.2 Implement message handling over plain Iroh
     - Port message serialization/deserialization logic
     - Adapt StandardDecoder/Encoder for Iroh streams
     - Maintain same error handling and recovery
     - _Requirements: 4.2, 4.3_
-  
-  - [ ]* 4.3 Write unit tests for PlainIrohConnection
+
+  - [x]* 4.3 Write unit tests for PlainIrohConnection
     - Test plain message flow over Iroh
     - Test interface compatibility with PlainConnection
     - Test error handling for Iroh-specific failures
