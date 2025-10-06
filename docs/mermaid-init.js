@@ -17,7 +17,25 @@
     }
 
     const theme = lastThemeWasLight ? 'default' : 'dark';
-    mermaid.initialize({ startOnLoad: true, theme });
+    mermaid.initialize({
+        startOnLoad: true,
+        theme,
+        themeVariables: {
+            primaryColor: '#BB86FC',
+            primaryTextColor: '#000',
+            primaryBorderColor: '#7C4DFF',
+            lineColor: '#F5F5F5',
+            secondaryColor: '#03DAC6',
+            tertiaryColor: '#3700B3',
+            background: '#FFFFFF',
+            mainBkg: '#E8EAF6',
+            secondBkg: '#F3E5F5',
+            mainContrastColor: 'darkgrey',
+            darkMode: !lastThemeWasLight,
+            fontSize: '16px',
+            fontFamily: '"Inter", "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif'
+        }
+    });
 
     // Simplest way to make mermaid re-render the diagrams in the new theme is via refreshing the page
 

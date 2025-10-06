@@ -15,8 +15,11 @@ command = "mdbook-mermaid"
 
 [output.html]
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-css = ["theme/custom.css"]
 git-repository-url = "https://github.com/stratum-mining/stratum"
 edit-url-template = "https://github.com/stratum-mining/stratum/edit/docs/unofficial-guide/docs/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
 
 [output.html.playground]
 editable = true

@@ -1,0 +1,154 @@
+/* Custom theme for Stratum V2 Documentation */
+
+/* Mermaid diagram improvements */
+.mermaid {
+    background: transparent !important;
+    text-align: center;
+    margin: 2em 0;
+}
+
+.mermaid svg {
+    max-width: 100%;
+    height: auto;
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1));
+}
+
+/* Light theme mermaid adjustments */
+.light .mermaid svg text {
+    fill: #333 !important;
+}
+
+.light .mermaid svg .node rect,
+.light .mermaid svg .node circle,
+.light .mermaid svg .node ellipse,
+.light .mermaid svg .node polygon {
+    stroke: #7C4DFF !important;
+    stroke-width: 2px !important;
+    fill: #E8EAF6 !important;
+}
+
+.light .mermaid svg .cluster rect {
+    stroke: #03DAC6 !important;
+    stroke-width: 2px !important;
+    fill: #F3E5F5 !important;
+    opacity: 0.8;
+}
+
+.light .mermaid svg .edgePath .path {
+    stroke: #666 !important;
+    stroke-width: 2px !important;
+}
+
+.light .mermaid svg .edgeLabel {
+    background-color: white !important;
+    padding: 4px 8px !important;
+    border-radius: 4px !important;
+}
+
+/* Dark theme mermaid adjustments */
+.coal .mermaid svg text,
+.navy .mermaid svg text,
+.ayu .mermaid svg text {
+    fill: #E8E8E8 !important;
+}
+
+.coal .mermaid svg .node rect,
+.coal .mermaid svg .node circle,
+.coal .mermaid svg .node ellipse,
+.coal .mermaid svg .node polygon,
+.navy .mermaid svg .node rect,
+.navy .mermaid svg .node circle,
+.navy .mermaid svg .node ellipse,
+.navy .mermaid svg .node polygon,
+.ayu .mermaid svg .node rect,
+.ayu .mermaid svg .node circle,
+.ayu .mermaid svg .node ellipse,
+.ayu .mermaid svg .node polygon {
+    stroke: #BB86FC !important;
+    stroke-width: 2px !important;
+    fill: #2d2d2d !important;
+}
+
+.coal .mermaid svg .cluster rect,
+.navy .mermaid svg .cluster rect,
+.ayu .mermaid svg .cluster rect {
+    stroke: #03DAC6 !important;
+    stroke-width: 2px !important;
+    fill: #1a1a1a !important;
+    opacity: 0.8;
+}
+
+.coal .mermaid svg .edgePath .path,
+.navy .mermaid svg .edgePath .path,
+.ayu .mermaid svg .edgePath .path {
+    stroke: #999 !important;
+    stroke-width: 2px !important;
+}
+
+.coal .mermaid svg .edgeLabel,
+.navy .mermaid svg .edgeLabel,
+.ayu .mermaid svg .edgeLabel {
+    background-color: #2d2d2d !important;
+    padding: 4px 8px !important;
+    border-radius: 4px !important;
+}
+
+/* Better table styling */
+table {
+    border-collapse: collapse;
+    margin: 1em 0;
+    width: 100%;
+}
+
+table thead {
+    background-color: var(--table-header-bg);
+}
+
+table th,
+table td {
+    padding: 0.75em 1em;
+    border: 1px solid var(--table-border-color);
+}
+
+table th {
+    font-weight: 600;
+    text-align: left;
+}
+
+table tr:nth-child(even) {
+    background-color: var(--table-alternate-bg);
+}
+
+/* Code block improvements */
+.content pre {
+    border-left: 3px solid var(--links);
+    padding-left: 1em;
+}
+
+/* Admonitions / callouts */
+blockquote {
+    border-left: 4px solid var(--links);
+    padding: 0.5em 1em;
+    margin: 1em 0;
+    background-color: var(--quote-bg);
+}
+
+blockquote p:first-child strong {
+    color: var(--links);
+}
+
+/* Better heading spacing */
+h2 {
+    margin-top: 2em;
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid var(--table-border-color);
+}
+
+h3 {
+    margin-top: 1.5em;
+}
+
+/* Navigation improvements */
+.nav-chapters {
+    font-size: 1.1em;
+}
