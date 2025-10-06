@@ -30,7 +30,7 @@ graph TB
 
     SV2Miner -->|SV2 Protocol| SRI
     SV1Miner -->|SV1 Protocol| SRI
-    SRI -->|GetBlockTemplate| Bitcoin
+    SRI -->|IPC + SV2 Template Distribution| Bitcoin
     SRI -->|submits blocks| Network
 
     style SRI fill:#f9f,stroke:#333,stroke-width:4px
@@ -47,9 +47,11 @@ graph TB
 - Miners submit shares and receive work assignments
 
 ### SRI → Bitcoin Node
-- SRI acts as a Template Provider client
-- Requests block templates via `getblocktemplate` RPC
-- Enables miners to construct their own blocks (optional)
+- SRI's Template Provider role interfaces directly with Bitcoin Core
+- Uses Bitcoin Core's **IPC (Inter-Process Communication) interface** with SV2 Template Distribution Protocol
+- More efficient than traditional JSON-RPC `getblocktemplate`
+- Leverages the same internal API as `getblocktemplate` but via IPC + SV2
+- Enables miners to construct their own blocks with custom transaction selection
 
 ### SRI → Bitcoin Network
 - Submits valid blocks found by miners

@@ -1,6 +1,6 @@
 # Template Provider Components
 
-The Template Provider acts as a bridge between Bitcoin Core and the SV2 pool, fetching block templates and distributing them to enable decentralized transaction selection.
+The Template Provider acts as a bridge between Bitcoin Core and the SV2 pool, using the Template Distribution Protocol to fetch and distribute block templates, enabling decentralized transaction selection. Unlike traditional pools that use `getblocktemplate` JSON-RPC, the Template Provider leverages Bitcoin Core's **IPC (Inter-Process Communication) interface** with SV2 protocol to access the same internal template generation API more efficiently.
 
 ## Component Diagram
 
@@ -27,7 +27,7 @@ graph TB
         Config[TP Configuration]
     end
 
-    Bitcoin[Bitcoin Core] -->|RPC| RpcClient
+    Bitcoin[Bitcoin Core] -->|IPC + SV2| RpcClient
     Bitcoin -->|ZMQ blocks| BlockListener
     RpcClient --> TemplatePoller
     TemplatePoller --> TemplateCache
@@ -47,47 +47,40 @@ graph TB
 
 ## Component Descriptions
 
-### RPC Client
+### Template Client (Bitcoin Core IPC)
 **Responsibilities:**
-- Connect to Bitcoin Core RPC interface
-- Execute `getblocktemplate` requests
-- Authenticate with RPC credentials
+- Interface with Bitcoin Core using its IPC (Inter-Process Communication) interface
+- Leverages Bitcoin Core's native IPC to access template generation
+- Uses SV2 Template Distribution Protocol over the IPC connection
+- Access the same internal API that `getblocktemplate` uses, but more efficiently
 - Handle connection errors and retries
 
-**Configuration:**
-- RPC URL (e.g., `http://127.0.0.1:8332`)
-- RPC username and password
-- Timeout settings
+**Key Architecture:**
+- Uses **Bitcoin Core's IPC interface** (not JSON-RPC)
+- SV2 binary protocol over IPC connection
+- More efficient than traditional JSON-RPC `getblocktemplate`
+- Direct integration with Bitcoin Core's internal template generation
+- No JSON serialization/deserialization overhead
 
-**Key RPC Calls:**
-```rust
-// Fetch block template
-getblocktemplate({
-    "rules": ["segwit", "taproot"]
-})
-
-// Returns:
-{
-    "version": 536870912,
-    "previousblockhash": "...",
-    "transactions": [...],
-    "coinbasevalue": 625000000,
-    "target": "...",
-    ...
-}
-```
+**Template Data Received:**
+- Block version
+- Previous block hash
+- Transaction list
+- Coinbase value
+- Difficulty target
+- Merkle branches
 
 ### Template Poller
 **Responsibilities:**
-- Periodically poll Bitcoin Core for new templates
+- Monitor for new templates from Bitcoin node via SV2 protocol
 - Detect when template has changed
-- Trigger template distribution
-- Implement intelligent polling intervals
+- Trigger template distribution to pool
+- Implement intelligent update strategies
 
-**Polling Strategy:**
-- **Fast poll**: Every 1-5 seconds when mempool active
-- **Slow poll**: Every 30 seconds when inactive
-- **Immediate poll**: On new block notification
+**Update Strategy:**
+- **Push-based**: Node sends updates when mempool changes (SV2 advantage)
+- **Event-driven**: Immediate notification on new blocks
+- **Efficient**: No wasteful polling - templates pushed when ready
 
 ### Block Listener
 **Responsibilities:**
@@ -255,35 +248,32 @@ Pool                          Template Provider
 
 ```toml
 [template_provider]
-# Bitcoin Core connection
-bitcoin_rpc_url = "http://127.0.0.1:8332"
-bitcoin_rpc_user = "bitcoin"
-bitcoin_rpc_password = "..."
+# Bitcoin Core IPC connection
+# Uses Bitcoin Core's IPC interface with SV2 Template Distribution Protocol
+# More efficient than JSON-RPC getblocktemplate
+bitcoin_core_ipc_socket = "/path/to/bitcoind.sock"
 
-# ZMQ (optional)
+# ZMQ for block notifications (optional but recommended)
 bitcoin_zmq_address = "tcp://127.0.0.1:28332"
 
-# SV2 server
+# SV2 server (for pool connections)
 listen_address = "0.0.0.0:8442"
 authority_public_key = "..."
 authority_secret_key = "..."
-
-# Polling
-template_poll_interval = 5
 ```
 
 ## Use Cases
 
 ### Standard Pool
-Pool uses Template Provider to get templates, then distributes work to miners:
+Pool uses Template Provider to get templates via Bitcoin Core's IPC, then distributes work to miners:
 ```
-Bitcoin Core → Template Provider → Pool → Miners
+Bitcoin Core → (IPC + SV2) → Template Provider → (SV2) → Pool → Miners
 ```
 
 ### Job Negotiation Pool
 Miners can request custom templates via Job Negotiation protocol:
 ```
-Miner → Pool (job negotiation) → Template Provider → Bitcoin Core
+Miner → Pool (job negotiation) → Template Provider → (IPC + SV2) → Bitcoin Core
      ← Pool (custom job) ←
 ```
 
