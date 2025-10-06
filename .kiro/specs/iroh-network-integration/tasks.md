@@ -64,26 +64,26 @@
     - Test error handling for Iroh-specific failures
     - _Requirements: 2.3, 4.1_
 
-- [ ] 5. Implement IrohNodeManager for node lifecycle
-  - [ ] 5.1 Create IrohNodeManager for managing Iroh nodes
+- [x] 5. Implement IrohNodeManager for node lifecycle
+  - [x] 5.1 Create IrohNodeManager for managing Iroh nodes
     - Implement node initialization with IrohNodeConfig
     - Add peer discovery and connection management
     - Implement persistent node identity across restarts
     - _Requirements: 7.2, 7.3, 7.4_
-  
-  - [ ] 5.2 Add Iroh listening capabilities for servers
+
+  - [x] 5.2 Add Iroh listening capabilities for servers
     - Implement server-side Iroh connection acceptance (no fallback needed)
     - Add ALPN protocol handling for Stratum V2
     - Support multiple concurrent Iroh connections
     - _Requirements: 1.1, 6.1, 6.2_
-  
-  - [ ] 5.3 Add configuration validation and error handling
+
+  - [x] 5.3 Add configuration validation and error handling
     - Validate relay servers and STUN server configurations
     - Implement clear error messages for configuration issues
     - Add logging for node initialization and peer discovery
     - _Requirements: 5.4, 7.4_
-  
-  - [ ]* 5.4 Write unit tests for IrohNodeManager
+
+  - [x]* 5.4 Write unit tests for IrohNodeManager
     - Test node initialization with various configurations
     - Test peer discovery and connection establishment
     - Test error handling for invalid configurations
