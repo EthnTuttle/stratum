@@ -1,0 +1,23 @@
+[book]
+authors = ["Ethan Tuttle"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Ethan's Unofficial Guide to Stratum V2"
+description = "An unofficial guide to understanding and implementing the Stratum V2 mining protocol"
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output]
+
+[output.html]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+git-repository-url = "https://github.com/stratum-mining/stratum"
+edit-url-template = "https://github.com/stratum-mining/stratum/edit/docs/unofficial-guide/docs/{path}"
+
+[output.html.playground]
+editable = true
+line-numbers = true
