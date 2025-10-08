@@ -19,8 +19,7 @@ graph TB
     subgraph "External Systems"
         SV2Miner[⛏️ SV2 Mining Device<br/>Native Stratum V2]
         SV1Miner[⛏️ Legacy SV1 Device<br/>Stratum V1 only]
-        Bitcoin[₿ Bitcoin Node<br/>Template Provider]
-        Network[🌐 Bitcoin Network<br/>Block Submission]
+        Bitcoin[₿ Bitcoin Node<br/>Templates & Block Submission]
     end
 
     Miner -->|operates| SV2Miner
@@ -30,8 +29,7 @@ graph TB
 
     SV2Miner -->|SV2 Protocol| SRI
     SV1Miner -->|SV1 Protocol| SRI
-    SRI -->|IPC + SV2 Template Distribution| Bitcoin
-    SRI -->|submits blocks| Network
+    SRI <-->|IPC + SV2<br/>Templates & Blocks| Bitcoin
 
     style SRI fill:#f9f,stroke:#333,stroke-width:4px
     style SV2Miner fill:#bbf
@@ -52,10 +50,8 @@ graph TB
 - More efficient than traditional JSON-RPC `getblocktemplate`
 - Leverages the same internal API as `getblocktemplate` but via IPC + SV2
 - Enables miners to construct their own blocks with custom transaction selection
-
-### SRI → Bitcoin Network
-- Submits valid blocks found by miners
-- Propagates blocks to the network
+- Submits valid blocks found by miners to the node
+- Node propagates blocks to the Bitcoin network
 
 ### Pool Operators
 - Deploy and configure SRI components
