@@ -26,7 +26,7 @@
 //! // Configure and initialize an Iroh node
 //! let config = IrohNodeConfig {
 //!     secret_key_path: Some("./iroh_key".into()),
-//!     alpn: b"stratum-v2".to_vec(),
+//!     alpn: StratumV2Alpn::Mining.to_vec(),
 //!     ..Default::default()
 //! };
 //!
@@ -58,7 +58,7 @@
 //! // Connect to a remote peer by NodeId (you would get this from the server)
 //! let peer_id: NodeId = unimplemented!("Get from server");
 //! let connection = manager.endpoint()
-//!     .connect(peer_id, b"stratum-v2")
+//!     .connect(peer_id, &StratumV2Alpn::Mining.to_vec())
 //!     .await?;
 //!
 //! // Open a bidirectional stream
@@ -92,15 +92,23 @@
 //! - Peer-to-peer connections across different networks
 //! - Resilient connections with automatic relay fallback
 //! - Mobile or residential network deployments
+//! - Zero-configuration local network discovery (mDNS)
+//! - Decentralized global discovery (mainline DHT)
 //!
 //! ## Configuration
 //!
 //! ### Iroh Node Configuration
 //!
 //! ```rust
-//! use network_helpers_sv2::{IrohNodeConfig, RelayMode};
+//! use network_helpers_sv2::{IrohNodeConfig, RelayMode, StratumV2Alpn};
 //! use std::net::{Ipv4Addr, SocketAddrV4};
 //!
+//! // Option 1: Use a specific subprotocol
+//! let config_mining = IrohNodeConfig::for_mining();
+//! let config_tp = IrohNodeConfig::for_template_provider();
+//! let config_jd = IrohNodeConfig::for_job_declarator();
+//!
+//! // Option 2: Configure manually
 //! let config = IrohNodeConfig {
 //!     // Persistent identity (optional)
 //!     secret_key_path: Some("./my_node_key".into()),
@@ -111,12 +119,39 @@
 //!     // Optional bind addresses
 //!     bind_addr_v4: Some(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
 //!
-//!     // ALPN protocol identifier
-//!     alpn: b"stratum-v2".to_vec(),
+//!     // ALPN protocol identifier (using enum for type safety)
+//!     alpn: StratumV2Alpn::Mining.to_vec(),
 //!
 //!     ..Default::default()
 //! };
 //! ```
+//!
+//! ### Stratum Subprotocols (ALPN)
+//!
+//! Each Stratum role uses a specific ALPN identifier for protocol negotiation:
+//!
+//! - **`StratumV2Alpn::Mining`**: Stratum V2 Mining (`sv2-m`) - SV2 pools accepting miners
+//! - **`StratumV2Alpn::MiningV1`**: Stratum V1 Mining (`sv1-m`) - Legacy SV1 endpoints (e.g., translator downstream)
+//! - **`StratumV2Alpn::TemplateProvider`**: Template Distribution (`sv2-tp`) - Template Providers
+//! - **`StratumV2Alpn::JobDeclarator`**: Job Declaration (`sv2-jd`) - Job Declarator Servers
+//!
+//! ### Peer Discovery
+//!
+//! The Iroh transport uses a three-tier discovery strategy for maximum resilience:
+//!
+//! - **mDNS (Local Network)**: Automatic discovery of peers on the same LAN or subnet.
+//!   Provides instant, zero-configuration discovery for local mining setups. Ideal for
+//!   home miners or small-scale operations on the same network.
+//!
+//! - **Mainline DHT (Global)**: Decentralized discovery via BitTorrent's mainline DHT network.
+//!   Provides censorship-resistant peer discovery without relying on centralized infrastructure.
+//!   Works globally and enables truly peer-to-peer connections.
+//!
+//! - **n0 DNS (Known Peers)**: Fast discovery via DNS records for known peers. Provides lower
+//!   latency for initial connections when DNS is available and reliable.
+//!
+//! All three mechanisms are enabled by default and work together, ensuring connectivity
+//! in any network environment - from local LANs to global Internet.
 
 pub mod noise_connection;
 pub mod noise_stream;
@@ -139,7 +174,7 @@ pub use noise_iroh_connection::IrohConnection;
 pub use plain_iroh_connection::PlainIrohConnection;
 
 // Export Iroh node management types
-pub use iroh_node::{IrohNodeConfig, IrohNodeManager};
+pub use iroh_node::{IrohNodeConfig, IrohNodeManager, StratumV2Alpn};
 
 // Re-export commonly used Iroh types for convenience
 pub use iroh::{NodeId as IrohNodeId, RelayMode};

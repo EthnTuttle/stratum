@@ -18,12 +18,19 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use stratum_common::network_helpers_sv2::{IrohNodeConfig, RelayMode, StratumV2Alpn};
 
 #[derive(Debug, serde::Deserialize, Clone)]
 pub struct JobDeclaratorServerConfig {
     #[serde(default = "default_true")]
     full_template_mode_required: bool,
     listen_jd_address: String,
+    /// Optional Iroh network address for accepting Job Declaration connections
+    #[serde(default)]
+    iroh_listen_address: Option<String>,
+    /// Iroh node configuration (relay servers, STUN servers, etc.)
+    #[serde(default)]
+    iroh_node_config: Option<IrohNodeConfigSerde>,
     authority_public_key: Secp256k1PublicKey,
     authority_secret_key: Secp256k1SecretKey,
     cert_validity_sec: u64,
@@ -55,6 +62,8 @@ impl JobDeclaratorServerConfig {
         Self {
             full_template_mode_required: true,
             listen_jd_address,
+            iroh_listen_address: None,
+            iroh_node_config: None,
             authority_public_key,
             authority_secret_key,
             cert_validity_sec,
@@ -145,10 +154,73 @@ impl JobDeclaratorServerConfig {
             self.log_file = Some(path);
         }
     }
+
+    /// Returns the Iroh listen address if configured.
+    pub fn iroh_listen_address(&self) -> Option<&String> {
+        self.iroh_listen_address.as_ref()
+    }
+
+    /// Returns the Iroh node configuration if configured.
+    pub fn iroh_node_config(&self) -> Option<IrohNodeConfig> {
+        self.iroh_node_config
+            .as_ref()
+            .map(|config| config.to_iroh_node_config())
+    }
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Serde-compatible Iroh node configuration
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct IrohNodeConfigSerde {
+    /// Optional path to store the secret key for persistent identity
+    #[serde(default)]
+    pub secret_key_path: Option<PathBuf>,
+    /// Relay mode configuration ("disabled", "default", or "custom")
+    #[serde(default = "default_relay_mode")]
+    pub relay_mode: String,
+    /// Optional custom ALPN protocol ("mining", "mining_v1", "tp", "jd")
+    /// Defaults to "jd" (Job Declarator) for JD server connections
+    #[serde(default)]
+    pub alpn_protocol: Option<String>,
+}
+
+fn default_relay_mode() -> String {
+    "default".to_string()
+}
+
+impl IrohNodeConfigSerde {
+    /// Converts the serde-compatible config to the actual IrohNodeConfig
+    pub fn to_iroh_node_config(&self) -> IrohNodeConfig {
+        let relay_mode = match self.relay_mode.to_lowercase().as_str() {
+            "disabled" => Some(RelayMode::Disabled),
+            "default" | _ => Some(RelayMode::Default), // fallback to default
+        };
+
+        // Parse ALPN using the StratumV2Alpn enum
+        let alpn = if let Some(ref alpn_str) = self.alpn_protocol {
+            match alpn_str.to_lowercase().as_str() {
+                "mining" | "m" | "sv2-m" => StratumV2Alpn::Mining.to_vec(),
+                "mining_v1" | "sv1" | "sv1-m" => StratumV2Alpn::MiningV1.to_vec(),
+                "tp" | "template_provider" => StratumV2Alpn::TemplateProvider.to_vec(),
+                "jd" | "job_declarator" => StratumV2Alpn::JobDeclarator.to_vec(),
+                _ => StratumV2Alpn::JobDeclarator.to_vec(), // default to JobDeclarator for JD server
+            }
+        } else {
+            StratumV2Alpn::JobDeclarator.to_vec() // default to JobDeclarator for JD server
+        };
+
+        IrohNodeConfig {
+            secret_key_path: self.secret_key_path.clone(),
+            secret_key: None, // Will be loaded from secret_key_path if provided
+            relay_mode,
+            bind_addr_v4: None,
+            bind_addr_v6: None,
+            alpn,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

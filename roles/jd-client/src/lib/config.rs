@@ -6,13 +6,22 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use stratum_common::roles_logic_sv2::bitcoin::{Amount, TxOut};
+use stratum_common::{
+    network_helpers_sv2::{IrohNodeConfig, RelayMode, StratumV2Alpn},
+    roles_logic_sv2::bitcoin::{Amount, TxOut},
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct JobDeclaratorClientConfig {
     // The address on which the JDC will listen for incoming connections when acting as an
     // upstream.
     listening_address: SocketAddr,
+    /// Optional Iroh network address for accepting downstream connections
+    #[serde(default)]
+    iroh_listen_address: Option<String>,
+    /// Iroh node configuration for upstream connections (JDS, Pool, TP)
+    #[serde(default)]
+    iroh_node_config: Option<IrohNodeConfigSerde>,
     // The maximum supported SV2 protocol version.
     max_supported_version: u16,
     // The minimum supported SV2 protocol version.
@@ -47,6 +56,57 @@ pub struct JobDeclaratorClientConfig {
     pub mode: ConfigJDCMode,
 }
 
+/// Serde-compatible Iroh node configuration
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct IrohNodeConfigSerde {
+    /// Optional path to store the secret key for persistent identity
+    #[serde(default)]
+    pub secret_key_path: Option<PathBuf>,
+    /// Relay mode configuration ("disabled", "default", or "custom")
+    #[serde(default = "default_relay_mode")]
+    pub relay_mode: String,
+    /// Optional custom ALPN protocol ("mining", "tp", "jd")
+    /// Defaults to "jd" (Job Declarator) for JD client connections
+    #[serde(default)]
+    pub alpn_protocol: Option<String>,
+}
+
+fn default_relay_mode() -> String {
+    "default".to_string()
+}
+
+impl IrohNodeConfigSerde {
+    /// Converts the serde-compatible config to the actual IrohNodeConfig
+    pub fn to_iroh_node_config(&self) -> IrohNodeConfig {
+        let relay_mode = match self.relay_mode.to_lowercase().as_str() {
+            "disabled" => Some(RelayMode::Disabled),
+            "default" | _ => Some(RelayMode::Default), // fallback to default
+        };
+
+        // Parse ALPN using the StratumV2Alpn enum
+        let alpn = if let Some(ref alpn_str) = self.alpn_protocol {
+            match alpn_str.to_lowercase().as_str() {
+                "mining" | "m" | "sv2-m" => StratumV2Alpn::Mining.to_vec(),
+                "mining_v1" | "sv1" | "sv1-m" => StratumV2Alpn::MiningV1.to_vec(),
+                "tp" | "template_provider" => StratumV2Alpn::TemplateProvider.to_vec(),
+                "jd" | "job_declarator" => StratumV2Alpn::JobDeclarator.to_vec(),
+                _ => StratumV2Alpn::JobDeclarator.to_vec(), // default to JobDeclarator for JD client
+            }
+        } else {
+            StratumV2Alpn::JobDeclarator.to_vec() // default to JobDeclarator for JD client
+        };
+
+        IrohNodeConfig {
+            secret_key_path: self.secret_key_path.clone(),
+            secret_key: None, // Will be loaded from secret_key_path if provided
+            relay_mode,
+            bind_addr_v4: None,
+            bind_addr_v6: None,
+            alpn,
+        }
+    }
+}
+
 impl JobDeclaratorClientConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -63,6 +123,8 @@ impl JobDeclaratorClientConfig {
     ) -> Self {
         Self {
             listening_address,
+            iroh_listen_address: None,
+            iroh_node_config: None,
             max_supported_version: protocol_config.max_supported_version,
             min_supported_version: protocol_config.min_supported_version,
             authority_public_key: pool_config.authority_public_key,
@@ -160,6 +222,18 @@ impl JobDeclaratorClientConfig {
 
     pub fn share_batch_size(&self) -> u64 {
         self.share_batch_size
+    }
+
+    /// Returns the Iroh listen address if configured.
+    pub fn iroh_listen_address(&self) -> Option<&String> {
+        self.iroh_listen_address.as_ref()
+    }
+
+    /// Returns the Iroh node configuration if configured.
+    pub fn iroh_node_config(&self) -> Option<IrohNodeConfig> {
+        self.iroh_node_config
+            .as_ref()
+            .map(|config| config.to_iroh_node_config())
     }
 }
 
@@ -267,9 +341,15 @@ pub struct Upstream {
     // The address of the upstream pool's main server.
     pub pool_address: String,
     pub pool_port: u16,
+    /// Optional Iroh NodeId for pool connection (if using Iroh transport)
+    #[serde(default)]
+    pub pool_iroh_node_id: Option<String>,
     // The network address of the JDS.
     pub jds_address: String,
     pub jds_port: u16,
+    /// Optional Iroh NodeId for JDS connection (if using Iroh transport)
+    #[serde(default)]
+    pub jds_iroh_node_id: Option<String>,
 }
 
 impl Upstream {
@@ -285,8 +365,10 @@ impl Upstream {
             authority_pubkey,
             pool_address,
             pool_port,
+            pool_iroh_node_id: None,
             jds_address,
             jds_port,
+            jds_iroh_node_id: None,
         }
     }
 }

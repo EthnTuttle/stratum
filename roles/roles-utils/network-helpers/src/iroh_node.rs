@@ -5,10 +5,107 @@ use codec_sv2::{
     binary_sv2::{Deserialize, GetSize, Serialize},
     StandardEitherFrame, HandshakeRole,
 };
-use iroh::{NodeId, Endpoint, RelayMode, SecretKey};
+use iroh::{
+    NodeId, Endpoint, RelayMode, SecretKey,
+    discovery::{
+        pkarr::dht::DhtDiscovery,
+        mdns::MdnsDiscovery,
+    },
+};
 use tracing::{debug, info, warn};
 
 use crate::{Error, noise_iroh_connection::IrohConnection};
+
+/// ALPN (Application-Layer Protocol Negotiation) identifiers for Stratum protocols
+///
+/// Each Stratum role uses a specific ALPN to identify its protocol during connection
+/// establishment. This allows Iroh nodes to multiplex different Stratum subprotocols
+/// over the same transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StratumV2Alpn {
+    /// Template Provider (TP) protocol - distributes block templates to pools
+    /// ALPN: "sv2-tp"
+    TemplateProvider,
+
+    /// Job Declarator Server (JDS) protocol - manages custom job declarations
+    /// ALPN: "sv2-jd"
+    JobDeclarator,
+
+    /// Stratum V2 Mining protocol - handles share submissions and mining work
+    /// ALPN: "sv2-m"
+    Mining,
+
+    /// Stratum V1 Mining protocol - legacy mining protocol
+    /// ALPN: "sv1-m"
+    MiningV1,
+}
+
+impl StratumV2Alpn {
+    /// Returns the ALPN protocol identifier as bytes
+    pub fn as_bytes(&self) -> &'static [u8] {
+        match self {
+            Self::TemplateProvider => b"sv2-tp",
+            Self::JobDeclarator => b"sv2-jd",
+            Self::Mining => b"sv2-m",
+            Self::MiningV1 => b"sv1-m",
+        }
+    }
+
+    /// Returns the ALPN protocol identifier as a string slice
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TemplateProvider => "sv2-tp",
+            Self::JobDeclarator => "sv2-jd",
+            Self::Mining => "sv2-m",
+            Self::MiningV1 => "sv1-m",
+        }
+    }
+
+    /// Returns the ALPN protocol identifier as a Vec<u8>
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+
+    /// Parse an ALPN from a string
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "sv2-tp" => Some(Self::TemplateProvider),
+            "sv2-jd" => Some(Self::JobDeclarator),
+            "sv2-m" | "sv2-mining" => Some(Self::Mining), // Accept both for compatibility
+            "sv1-m" | "sv1-mining" => Some(Self::MiningV1), // Accept both for compatibility
+            _ => None,
+        }
+    }
+
+    /// Parse an ALPN from bytes
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        match b {
+            b"sv2-tp" => Some(Self::TemplateProvider),
+            b"sv2-jd" => Some(Self::JobDeclarator),
+            b"sv2-m" | b"sv2-mining" => Some(Self::Mining), // Accept both for compatibility
+            b"sv1-m" | b"sv1-mining" => Some(Self::MiningV1), // Accept both for compatibility
+            _ => None,
+        }
+    }
+}
+
+impl Default for StratumV2Alpn {
+    fn default() -> Self {
+        Self::Mining
+    }
+}
+
+impl From<StratumV2Alpn> for Vec<u8> {
+    fn from(alpn: StratumV2Alpn) -> Self {
+        alpn.to_vec()
+    }
+}
+
+impl std::fmt::Display for StratumV2Alpn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
 
 /// Configuration for an Iroh node
 #[derive(Debug, Clone)]
@@ -38,8 +135,38 @@ impl Default for IrohNodeConfig {
             relay_mode: Some(RelayMode::Default),
             bind_addr_v4: None,
             bind_addr_v6: None,
-            alpn: b"stratum-v2".to_vec(),
+            alpn: StratumV2Alpn::default().to_vec(),
         }
+    }
+}
+
+impl IrohNodeConfig {
+    /// Create a new IrohNodeConfig with a specific ALPN
+    pub fn with_alpn(alpn: StratumV2Alpn) -> Self {
+        Self {
+            alpn: alpn.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a new IrohNodeConfig for Template Provider protocol
+    pub fn for_template_provider() -> Self {
+        Self::with_alpn(StratumV2Alpn::TemplateProvider)
+    }
+
+    /// Create a new IrohNodeConfig for Job Declarator protocol
+    pub fn for_job_declarator() -> Self {
+        Self::with_alpn(StratumV2Alpn::JobDeclarator)
+    }
+
+    /// Create a new IrohNodeConfig for Mining protocol
+    pub fn for_mining() -> Self {
+        Self::with_alpn(StratumV2Alpn::Mining)
+    }
+
+    /// Create a new IrohNodeConfig for Stratum V1 Mining protocol
+    pub fn for_mining_v1() -> Self {
+        Self::with_alpn(StratumV2Alpn::MiningV1)
     }
 }
 
@@ -69,6 +196,9 @@ impl IrohNodeManager {
             SecretKey::generate(&mut rand::thread_rng())
         };
 
+        // Get NodeId for mDNS discovery (before building endpoint)
+        let node_id = secret_key.public();
+
         // Build endpoint with configuration
         let mut builder = Endpoint::builder()
             .secret_key(secret_key)
@@ -90,7 +220,16 @@ impl IrohNodeManager {
             debug!("Configured IPv6 bind address: {}", addr_v6);
         }
 
-        // Add discovery (using default n0 DNS discovery)
+        // Add discovery mechanisms (three-tier strategy for maximum resilience)
+        // 1. mDNS: Local network discovery (LAN/same subnet) - fastest for local peers
+        // 2. Mainline DHT: Global decentralized discovery - censorship-resistant, works anywhere
+        // 3. n0 DNS: Fast DNS-based discovery for known peers - low latency when DNS available
+        // All three mechanisms work together to ensure connectivity in any network environment
+        builder = builder.add_discovery(
+            MdnsDiscovery::new(node_id, true)
+                .map_err(|e| Error::IrohNodeInitialization(e.into()))?
+        );
+        builder = builder.add_discovery(DhtDiscovery::default());
         builder = builder.discovery_n0();
 
         // Bind the endpoint
@@ -284,7 +423,7 @@ mod tests {
         assert!(config.relay_mode.is_some());
         assert!(config.bind_addr_v4.is_none());
         assert!(config.bind_addr_v6.is_none());
-        assert_eq!(config.alpn, b"stratum-v2");
+        assert_eq!(config.alpn, b"sv2-m"); // Default is Mining
     }
 
     /// Test node initialization with default config
@@ -460,5 +599,71 @@ mod tests {
 
         let manager = IrohNodeManager::new(config).await.unwrap();
         assert_eq!(manager.config().alpn, custom_alpn);
+    }
+
+    /// Test StratumV2Alpn enum conversions
+    #[test]
+    fn test_alpn_enum() {
+        // Test as_bytes()
+        assert_eq!(StratumV2Alpn::Mining.as_bytes(), b"sv2-m");
+        assert_eq!(StratumV2Alpn::MiningV1.as_bytes(), b"sv1-m");
+        assert_eq!(StratumV2Alpn::TemplateProvider.as_bytes(), b"sv2-tp");
+        assert_eq!(StratumV2Alpn::JobDeclarator.as_bytes(), b"sv2-jd");
+
+        // Test as_str()
+        assert_eq!(StratumV2Alpn::Mining.as_str(), "sv2-m");
+        assert_eq!(StratumV2Alpn::MiningV1.as_str(), "sv1-m");
+        assert_eq!(StratumV2Alpn::TemplateProvider.as_str(), "sv2-tp");
+        assert_eq!(StratumV2Alpn::JobDeclarator.as_str(), "sv2-jd");
+
+        // Test from_str()
+        assert_eq!(StratumV2Alpn::from_str("sv2-m"), Some(StratumV2Alpn::Mining));
+        assert_eq!(StratumV2Alpn::from_str("sv1-m"), Some(StratumV2Alpn::MiningV1));
+        assert_eq!(StratumV2Alpn::from_str("sv2-tp"), Some(StratumV2Alpn::TemplateProvider));
+        assert_eq!(StratumV2Alpn::from_str("sv2-jd"), Some(StratumV2Alpn::JobDeclarator));
+
+        // Test from_str() - backward compatibility
+        assert_eq!(StratumV2Alpn::from_str("sv2-mining"), Some(StratumV2Alpn::Mining));
+        assert_eq!(StratumV2Alpn::from_str("sv1-mining"), Some(StratumV2Alpn::MiningV1));
+        assert_eq!(StratumV2Alpn::from_str("invalid"), None);
+
+        // Test from_bytes()
+        assert_eq!(StratumV2Alpn::from_bytes(b"sv2-m"), Some(StratumV2Alpn::Mining));
+        assert_eq!(StratumV2Alpn::from_bytes(b"sv1-m"), Some(StratumV2Alpn::MiningV1));
+        assert_eq!(StratumV2Alpn::from_bytes(b"sv2-tp"), Some(StratumV2Alpn::TemplateProvider));
+        assert_eq!(StratumV2Alpn::from_bytes(b"sv2-jd"), Some(StratumV2Alpn::JobDeclarator));
+
+        // Test from_bytes() - backward compatibility
+        assert_eq!(StratumV2Alpn::from_bytes(b"sv2-mining"), Some(StratumV2Alpn::Mining));
+        assert_eq!(StratumV2Alpn::from_bytes(b"sv1-mining"), Some(StratumV2Alpn::MiningV1));
+        assert_eq!(StratumV2Alpn::from_bytes(b"invalid"), None);
+
+        // Test Display
+        assert_eq!(format!("{}", StratumV2Alpn::Mining), "sv2-m");
+        assert_eq!(format!("{}", StratumV2Alpn::MiningV1), "sv1-m");
+        assert_eq!(format!("{}", StratumV2Alpn::TemplateProvider), "sv2-tp");
+        assert_eq!(format!("{}", StratumV2Alpn::JobDeclarator), "sv2-jd");
+
+        // Test Default (should be Mining)
+        assert_eq!(StratumV2Alpn::default(), StratumV2Alpn::Mining);
+    }
+
+    /// Test IrohNodeConfig convenience constructors
+    #[test]
+    fn test_iroh_node_config_constructors() {
+        let mining_config = IrohNodeConfig::for_mining();
+        assert_eq!(mining_config.alpn, b"sv2-m");
+
+        let mining_v1_config = IrohNodeConfig::for_mining_v1();
+        assert_eq!(mining_v1_config.alpn, b"sv1-m");
+
+        let tp_config = IrohNodeConfig::for_template_provider();
+        assert_eq!(tp_config.alpn, b"sv2-tp");
+
+        let jd_config = IrohNodeConfig::for_job_declarator();
+        assert_eq!(jd_config.alpn, b"sv2-jd");
+
+        let custom_config = IrohNodeConfig::with_alpn(StratumV2Alpn::TemplateProvider);
+        assert_eq!(custom_config.alpn, b"sv2-tp");
     }
 }

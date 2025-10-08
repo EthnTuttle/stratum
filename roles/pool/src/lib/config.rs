@@ -12,11 +12,18 @@ use std::path::{Path, PathBuf};
 
 use config_helpers_sv2::CoinbaseRewardScript;
 use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
+use stratum_common::network_helpers_sv2::{IrohNodeConfig, RelayMode, StratumV2Alpn};
 
 /// Configuration for the Pool, including connection, authority, and coinbase settings.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct PoolConfig {
     listen_address: String,
+    /// Optional Iroh network address for accepting downstream connections
+    #[serde(default)]
+    iroh_listen_address: Option<String>,
+    /// Iroh node configuration (relay servers, STUN servers, etc.)
+    #[serde(default)]
+    iroh_node_config: Option<IrohNodeConfigSerde>,
     tp_address: String,
     tp_authority_public_key: Option<Secp256k1PublicKey>,
     authority_public_key: Secp256k1PublicKey,
@@ -28,6 +35,29 @@ pub struct PoolConfig {
     share_batch_size: usize,
     log_file: Option<PathBuf>,
     server_id: u16,
+}
+
+/// Serde-compatible Iroh node configuration
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct IrohNodeConfigSerde {
+    /// Optional path to store the secret key for persistent identity
+    #[serde(default)]
+    pub secret_key_path: Option<PathBuf>,
+    /// Relay mode configuration ("disabled", "default", or "custom")
+    #[serde(default = "default_relay_mode")]
+    pub relay_mode: String,
+    /// ALPN protocol identifier ("mining", "tp", "jd", or "generic")
+    /// Defaults to "mining" for pool connections
+    #[serde(default = "default_pool_alpn")]
+    pub alpn_protocol: String,
+}
+
+fn default_relay_mode() -> String {
+    "default".to_string()
+}
+
+fn default_pool_alpn() -> String {
+    "mining".to_string()
 }
 
 impl PoolConfig {
@@ -47,6 +77,8 @@ impl PoolConfig {
     ) -> Self {
         Self {
             listen_address: pool_connection.listen_address,
+            iroh_listen_address: None,
+            iroh_node_config: None,
             tp_address: template_provider.address,
             tp_authority_public_key: template_provider.authority_public_key,
             authority_public_key: authority_config.public_key,
@@ -135,6 +167,46 @@ impl PoolConfig {
     /// Returns the server id.
     pub fn server_id(&self) -> u16 {
         self.server_id
+    }
+
+    /// Returns the Iroh listen address if configured.
+    pub fn iroh_listen_address(&self) -> Option<&String> {
+        self.iroh_listen_address.as_ref()
+    }
+
+    /// Returns the Iroh node configuration if configured.
+    pub fn iroh_node_config(&self) -> Option<IrohNodeConfig> {
+        self.iroh_node_config
+            .as_ref()
+            .map(|config| config.to_iroh_node_config())
+    }
+}
+
+impl IrohNodeConfigSerde {
+    /// Converts the serde-compatible config to the actual IrohNodeConfig
+    pub fn to_iroh_node_config(&self) -> IrohNodeConfig {
+        let relay_mode = match self.relay_mode.to_lowercase().as_str() {
+            "disabled" => Some(RelayMode::Disabled),
+            "default" | _ => Some(RelayMode::Default), // fallback to default
+        };
+
+        // Parse ALPN using the StratumV2Alpn enum
+        let alpn = match self.alpn_protocol.to_lowercase().as_str() {
+            "mining" | "m" | "sv2-m" => StratumV2Alpn::Mining.to_vec(),
+            "mining_v1" | "sv1" | "sv1-m" => StratumV2Alpn::MiningV1.to_vec(),
+            "tp" | "template_provider" => StratumV2Alpn::TemplateProvider.to_vec(),
+            "jd" | "job_declarator" => StratumV2Alpn::JobDeclarator.to_vec(),
+            _ => StratumV2Alpn::Mining.to_vec(), // default to Mining for pools
+        };
+
+        IrohNodeConfig {
+            secret_key_path: self.secret_key_path.clone(),
+            secret_key: None, // Will be loaded from secret_key_path if provided
+            relay_mode,
+            bind_addr_v4: None,
+            bind_addr_v6: None,
+            alpn,
+        }
     }
 }
 
