@@ -1,8 +1,13 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use async_channel::{unbounded, Receiver, Sender};
+// Import iroh NodeId from the iroh crate (used by network-helpers internally)
+use iroh::NodeId;
 use key_utils::Secp256k1PublicKey;
-use stratum_common::roles_logic_sv2::bitcoin::consensus::Encodable;
+use stratum_common::{
+    network_helpers_sv2::IrohNodeManager,
+    roles_logic_sv2::bitcoin::consensus::Encodable,
+};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -30,6 +35,17 @@ mod task_manager;
 mod template_receiver;
 mod upstream;
 pub mod utils;
+
+/// Represents upstream connection information including optional Iroh support
+#[derive(Clone, Debug)]
+pub struct UpstreamConnectionInfo {
+    pub pool_address: SocketAddr,
+    pub jds_address: SocketAddr,
+    pub authority_pubkey: Secp256k1PublicKey,
+    pub is_malicious: bool,
+    pub pool_iroh_node_id: Option<NodeId>,
+    pub jds_iroh_node_id: Option<NodeId>,
+}
 
 /// Represent Job Declarator Client
 #[derive(Clone)]
@@ -140,6 +156,23 @@ impl JobDeclaratorClient {
             )
             .await;
 
+        // Initialize Iroh node manager if configured
+        let iroh_manager = if let Some(iroh_config) = self.config.iroh_node_config() {
+            info!("Initializing Iroh node manager for JD Client");
+            match IrohNodeManager::new(iroh_config).await {
+                Ok(manager) => {
+                    info!("Iroh node initialized with Node ID: {}", manager.node_id());
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize Iroh node manager, will use TCP only: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut upstream_addresses: Vec<_> = self
             .config
             .upstreams()
@@ -153,7 +186,20 @@ impl JobDeclaratorClient {
                     u.jds_address.parse().expect("Invalid JD address"),
                     u.jds_port,
                 );
-                (pool_addr, jd_addr, u.authority_pubkey, false)
+                let pool_iroh_node_id = u.pool_iroh_node_id.as_ref().and_then(|s| {
+                    s.parse::<NodeId>().ok()
+                });
+                let jds_iroh_node_id = u.jds_iroh_node_id.as_ref().and_then(|s| {
+                    s.parse::<NodeId>().ok()
+                });
+                UpstreamConnectionInfo {
+                    pool_address: pool_addr,
+                    jds_address: jd_addr,
+                    authority_pubkey: u.authority_pubkey,
+                    is_malicious: false,
+                    pool_iroh_node_id,
+                    jds_iroh_node_id,
+                }
             })
             .collect();
 
@@ -178,6 +224,7 @@ impl JobDeclaratorClient {
                 status_sender.clone(),
                 self.config.mode.clone(),
                 task_manager.clone(),
+                iroh_manager.clone(),
             )
             .await
         {
@@ -282,6 +329,7 @@ impl JobDeclaratorClient {
                                         status_sender.clone(),
                                         self.config.mode.clone(),
                                         task_manager.clone(),
+                                        iroh_manager.clone(),
                                     )
                                     .await
                                 {
@@ -350,7 +398,7 @@ impl JobDeclaratorClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn initialize_jd(
         &self,
-        upstreams: &mut [(SocketAddr, SocketAddr, Secp256k1PublicKey, bool)],
+        upstreams: &mut [UpstreamConnectionInfo],
         channel_manager_to_upstream_receiver: Receiver<SV2Frame>,
         upstream_to_channel_manager_sender: Sender<SV2Frame>,
         channel_manager_to_jd_receiver: Receiver<SV2Frame>,
@@ -359,6 +407,7 @@ impl JobDeclaratorClient {
         status_sender: Sender<Status>,
         mode: ConfigJDCMode,
         task_manager: Arc<TaskManager>,
+        iroh_manager: Option<Arc<IrohNodeManager>>,
     ) -> Result<(Upstream, JobDeclarator), JDCError> {
         const MAX_RETRIES: usize = 3;
         let upstream_len = upstreams.len();
@@ -372,7 +421,7 @@ impl JobDeclaratorClient {
 
             tokio::time::sleep(Duration::from_secs(1)).await;
 
-            if upstream_addr.3 {
+            if upstream_addr.is_malicious {
                 info!(
                     "Upstream previously marked as malicious, skipping initial attempt warnings."
                 );
@@ -392,11 +441,12 @@ impl JobDeclaratorClient {
                     status_sender.clone(),
                     mode.clone(),
                     task_manager.clone(),
+                    iroh_manager.clone(),
                 )
                 .await
                 {
                     Ok(pair) => {
-                        upstream_addr.3 = true;
+                        upstream_addr.is_malicious = true;
                         return Ok(pair);
                     }
                     Err(e) => {
@@ -418,7 +468,7 @@ impl JobDeclaratorClient {
                     }
                 }
             }
-            upstream_addr.3 = true;
+            upstream_addr.is_malicious = true;
         }
 
         tracing::error!("All upstreams failed after {} retries each", MAX_RETRIES);
@@ -429,7 +479,7 @@ impl JobDeclaratorClient {
 // Attempts to initialize a single upstream (pool + JDS pair).
 #[allow(clippy::too_many_arguments)]
 async fn try_initialize_single(
-    upstream_addr: &(SocketAddr, SocketAddr, Secp256k1PublicKey, bool),
+    upstream_addr: &UpstreamConnectionInfo,
     upstream_to_channel_manager_sender: Sender<SV2Frame>,
     channel_manager_to_upstream_receiver: Receiver<SV2Frame>,
     jd_to_channel_manager_sender: Sender<SV2Frame>,
@@ -438,6 +488,7 @@ async fn try_initialize_single(
     status_sender: Sender<Status>,
     mode: ConfigJDCMode,
     task_manager: Arc<TaskManager>,
+    iroh_manager: Option<Arc<IrohNodeManager>>,
 ) -> Result<(Upstream, JobDeclarator), JDCError> {
     info!("Upstream connection in-progress at initialize single");
     let upstream = Upstream::new(
@@ -447,6 +498,7 @@ async fn try_initialize_single(
         notify_shutdown.clone(),
         task_manager.clone(),
         status_sender.clone(),
+        iroh_manager.clone(),
     )
     .await?;
 
@@ -460,6 +512,7 @@ async fn try_initialize_single(
         mode,
         task_manager.clone(),
         status_sender.clone(),
+        iroh_manager,
     )
     .await?;
 

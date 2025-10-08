@@ -9,12 +9,15 @@
 //! - Forward SV2 mining messages between upstream and channel manager
 //! - Handle common messages from upstream
 
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 use async_channel::{unbounded, Receiver, Sender};
-use key_utils::Secp256k1PublicKey;
 use stratum_common::{
-    network_helpers_sv2::noise_stream::NoiseTcpStream,
+    network_helpers_sv2::{
+        noise_stream::NoiseTcpStream,
+        noise_iroh_stream::NoiseIrohStream,
+        IrohNodeManager,
+    },
     roles_logic_sv2::{
         codec_sv2::{self, framing_sv2, HandshakeRole, Initiator},
         handlers_sv2::HandleCommonMessagesFromServerAsync,
@@ -32,9 +35,10 @@ use crate::{
     status::{handle_error, Status, StatusSender},
     task_manager::TaskManager,
     utils::{
-        get_setup_connection_message, protocol_message_type, spawn_io_tasks, Message, MessageType,
-        SV2Frame, ShutdownMessage, StdFrame,
+        get_setup_connection_message, protocol_message_type, spawn_io_tasks_with_noise, Message, MessageType,
+        NoiseReader, NoiseWriter, SV2Frame, ShutdownMessage, StdFrame,
     },
+    UpstreamConnectionInfo,
 };
 
 mod message_handler;
@@ -69,45 +73,102 @@ pub struct Upstream {
 impl Upstream {
     /// Create a new [`Upstream`] connection to the given address.
     ///
-    /// - Establishes TCP + Noise connection
+    /// - Establishes TCP or Iroh + Noise connection
     /// - Spawns IO tasks to handle inbound/outbound traffic
     pub async fn new(
-        upstreams: &(SocketAddr, SocketAddr, Secp256k1PublicKey, bool),
+        upstream_info: &UpstreamConnectionInfo,
         channel_manager_sender: Sender<SV2Frame>,
         channel_manager_receiver: Receiver<SV2Frame>,
         notify_shutdown: broadcast::Sender<ShutdownMessage>,
         task_manager: Arc<TaskManager>,
         status_sender: Sender<Status>,
+        iroh_manager: Option<Arc<IrohNodeManager>>,
     ) -> Result<Self, JDCError> {
-        let (addr, _, pubkey, _) = upstreams;
-        let stream = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            TcpStream::connect(addr),
-        )
-        .await??;
-        info!("Connected to upstream at {}", addr);
-        let initiator = Initiator::from_raw_k(pubkey.into_bytes())?;
-        debug!("Begin with noise setup in upstream connection");
-        let (noise_stream_reader, noise_stream_writer) =
-            NoiseTcpStream::<Message>::new(stream, HandshakeRole::Initiator(initiator))
-                .await?
-                .into_split();
+        let addr = upstream_info.pool_address;
+        let pubkey = upstream_info.authority_pubkey;
+
+        // Get noise streams - either via Iroh or TCP
+        let (reader, writer) =
+            if let (Some(node_id), Some(iroh_mgr)) = (upstream_info.pool_iroh_node_id, iroh_manager.as_ref()) {
+                info!("Connecting to Pool via Iroh at NodeID: {}", node_id);
+                match iroh_mgr.endpoint().connect(node_id, &iroh_mgr.config().alpn).await {
+                    Ok(connection) => {
+                        match connection.open_bi().await {
+                            Ok((send_stream, recv_stream)) => {
+                                info!("Iroh connection established with Pool");
+                                let initiator = Initiator::from_raw_k(pubkey.into_bytes())?;
+                                debug!("Begin with noise setup in upstream Iroh connection");
+                                let (r, w) = NoiseIrohStream::<Message>::new(send_stream, recv_stream, HandshakeRole::Initiator(initiator))
+                                    .await?
+                                    .into_split();
+                                (NoiseReader::Iroh(r), NoiseWriter::Iroh(w))
+                            }
+                            Err(e) => {
+                                warn!("Failed to open Iroh bi-directional stream: {:?}, falling back to TCP", e);
+                                // Fall back to TCP
+                                let stream = tokio::time::timeout(
+                                    tokio::time::Duration::from_secs(5),
+                                    TcpStream::connect(addr),
+                                )
+                                .await??;
+                                info!("TCP fallback connection established with Pool at {addr}");
+                                let initiator = Initiator::from_raw_k(pubkey.into_bytes())?;
+                                debug!("Begin with noise setup in upstream TCP connection");
+                                let (r, w) = NoiseTcpStream::<Message>::new(stream, HandshakeRole::Initiator(initiator))
+                                    .await?
+                                    .into_split();
+                                (NoiseReader::Tcp(r), NoiseWriter::Tcp(w))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to connect via Iroh: {:?}, falling back to TCP", e);
+                        // Fall back to TCP
+                        let stream = tokio::time::timeout(
+                            tokio::time::Duration::from_secs(5),
+                            TcpStream::connect(addr),
+                        )
+                        .await??;
+                        info!("TCP fallback connection established with Pool at {addr}");
+                        let initiator = Initiator::from_raw_k(pubkey.into_bytes())?;
+                        debug!("Begin with noise setup in upstream TCP connection");
+                        let (r, w) = NoiseTcpStream::<Message>::new(stream, HandshakeRole::Initiator(initiator))
+                            .await?
+                            .into_split();
+                        (NoiseReader::Tcp(r), NoiseWriter::Tcp(w))
+                    }
+                }
+            } else {
+                info!("Connecting to Pool via TCP at {addr}");
+                let stream = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(5),
+                    TcpStream::connect(addr),
+                )
+                .await??;
+                info!("Connected to upstream at {}", addr);
+                let initiator = Initiator::from_raw_k(pubkey.into_bytes())?;
+                debug!("Begin with noise setup in upstream TCP connection");
+                let (r, w) = NoiseTcpStream::<Message>::new(stream, HandshakeRole::Initiator(initiator))
+                    .await?
+                    .into_split();
+                (NoiseReader::Tcp(r), NoiseWriter::Tcp(w))
+            };
 
         let status_sender = StatusSender::Upstream(status_sender);
         let (inbound_tx, inbound_rx) = unbounded::<SV2Frame>();
         let (outbound_tx, outbound_rx) = unbounded::<SV2Frame>();
 
-        spawn_io_tasks(
+        spawn_io_tasks_with_noise(
             task_manager,
-            noise_stream_reader,
-            noise_stream_writer,
+            reader,
+            writer,
             outbound_rx,
             inbound_tx,
             notify_shutdown,
             status_sender,
         );
 
-        debug!("Noise setup done  in upstream connection");
+        debug!("Noise setup done in upstream connection");
         let upstream_data = Arc::new(Mutex::new(UpstreamData));
         let upstream_channel = UpstreamChannel {
             channel_manager_receiver,

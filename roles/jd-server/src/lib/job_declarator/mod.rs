@@ -28,7 +28,10 @@ use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey, SignatureService};
 use nohash_hasher::BuildNoHashHasher;
 use std::{collections::HashMap, convert::TryInto, sync::Arc};
 use stratum_common::{
-    network_helpers_sv2::noise_connection::Connection,
+    network_helpers_sv2::{
+        noise_connection::Connection,
+        IrohNodeManager,
+    },
     roles_logic_sv2::{
         self,
         bitcoin::{consensus::encode::serialize, Amount, Block, Transaction, TxOut, Txid},
@@ -478,7 +481,7 @@ impl JobDeclarator {
     /// - Accepts configuration and shared components (status sender, mempool, etc.).
     /// - Initializes internal state.
     /// - Begins listening for downstream connections via
-    ///   [`JobDeclarator::accept_incoming_connection`].
+    ///   [`JobDeclarator::accept_incoming_connection`] and optionally [`JobDeclarator::accept_incoming_iroh_connection`].
     pub async fn start(
         config: JobDeclaratorServerConfig,
         status_tx: crate::status::Sender,
@@ -488,6 +491,41 @@ impl JobDeclarator {
     ) {
         let self_ = Arc::new(Mutex::new(Self {}));
         info!("JD INITIALIZED");
+
+        // Initialize Iroh node manager if configured
+        if let Some(iroh_config) = config.iroh_node_config() {
+            info!("Initializing Iroh node manager for JD Server");
+            match IrohNodeManager::new(iroh_config).await {
+                Ok(manager) => {
+                    info!("Iroh node initialized with Node ID: {}", manager.node_id());
+                    let iroh_manager = Arc::new(manager);
+
+                    // Spawn Iroh connection handler
+                    let config_clone = config.clone();
+                    let status_tx_clone = status_tx.clone();
+                    let mempool_clone = mempool.clone();
+                    let new_block_sender_clone = new_block_sender.clone();
+                    let sender_add_txs_clone = sender_add_txs_to_mempool.clone();
+
+                    tokio::spawn(async move {
+                        Self::accept_incoming_iroh_connection(
+                            config_clone,
+                            status_tx_clone,
+                            mempool_clone,
+                            new_block_sender_clone,
+                            sender_add_txs_clone,
+                            iroh_manager,
+                        )
+                        .await;
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to initialize Iroh node manager: {:?}", e);
+                }
+            }
+        }
+
+        // Start TCP connection handler
         Self::accept_incoming_connection(
             self_,
             config,
@@ -498,6 +536,105 @@ impl JobDeclarator {
         )
         .await;
     }
+    async fn accept_incoming_iroh_connection(
+        config: JobDeclaratorServerConfig,
+        status_tx: crate::status::Sender,
+        mempool: Arc<Mutex<JDsMempool>>,
+        new_block_sender: Sender<String>,
+        sender_add_txs_to_mempool: Sender<AddTrasactionsToMempoolInner>,
+        iroh_manager: Arc<IrohNodeManager>,
+    ) {
+        use super::{JdsMessages, StdFrame};
+
+        info!("JD Server is listening for Iroh connections on Node ID: {}", iroh_manager.node_id());
+
+        loop {
+            let responder = Responder::from_authority_kp(
+                &config.authority_public_key().into_bytes(),
+                &config.authority_secret_key().into_bytes(),
+                std::time::Duration::from_secs(config.cert_validity_sec()),
+            ).unwrap();
+
+            match iroh_manager.accept_connection(HandshakeRole::Responder(responder)).await {
+                Ok((receiver, sender)) => {
+                    info!("Accepted new Iroh connection");
+
+                    match receiver.recv().await {
+                        Ok(EitherFrame::Sv2(mut sv2_message)) => {
+                            debug!("Received SV2 message over Iroh: {:?}", sv2_message);
+                            let payload = sv2_message.payload();
+
+                            if let Ok(setup_connection) = binary_sv2::from_bytes::<SetupConnection>(payload) {
+                                let flag = setup_connection.flags;
+                                let is_valid = SetupConnection::check_flags(
+                                    Protocol::JobDeclarationProtocol,
+                                    config.full_template_mode_required() as u32,
+                                    flag,
+                                );
+
+                                if is_valid {
+                                    let success_message = SetupConnectionSuccess {
+                                        used_version: 2,
+                                        flags: (setup_connection.flags & 1u32),
+                                    };
+                                    info!("Sending success message for Iroh connection");
+                                    let sv2_frame: StdFrame = JdsMessages::Common(success_message.into())
+                                        .try_into()
+                                        .expect("Failed to convert setup connection response message to standard frame");
+
+                                    sender.send(sv2_frame.into()).await.unwrap();
+
+                                    let jddownstream = Arc::new(Mutex::new(
+                                        JobDeclaratorDownstream::new(
+                                            (setup_connection.flags & 1u32) != 0u32,
+                                            receiver.clone(),
+                                            sender.clone(),
+                                            &config,
+                                            mempool.clone(),
+                                            sender_add_txs_to_mempool.clone(),
+                                        ),
+                                    ));
+
+                                    JobDeclaratorDownstream::start(
+                                        jddownstream,
+                                        status_tx.clone(),
+                                        new_block_sender.clone(),
+                                    );
+                                } else {
+                                    let error_message = SetupConnectionError {
+                                        flags: flag,
+                                        error_code: "unsupported-feature-flags"
+                                            .to_string()
+                                            .into_bytes()
+                                            .try_into()
+                                            .unwrap(),
+                                    };
+                                    info!("Sending error message for Iroh connection");
+                                    let sv2_frame: StdFrame = JdsMessages::Common(error_message.into())
+                                        .try_into()
+                                        .expect("Failed to convert setup connection response message to standard frame");
+
+                                    sender.send(sv2_frame.into()).await.unwrap();
+                                }
+                            } else {
+                                error!("Error parsing SetupConnection message from Iroh");
+                            }
+                        }
+                        Ok(EitherFrame::HandShake(handshake_message)) => {
+                            error!("Unexpected handshake message from Iroh upstream: {:?}", handshake_message);
+                        }
+                        Err(e) => {
+                            error!("Error receiving message from Iroh: {:?}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Error accepting Iroh connection: {:?}", e);
+                }
+            }
+        }
+    }
+
     async fn accept_incoming_connection(
         _self_: Arc<Mutex<JobDeclarator>>,
         config: JobDeclaratorServerConfig,

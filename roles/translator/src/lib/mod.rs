@@ -12,6 +12,7 @@
 //! etc.) for specialized functionalities.
 #![allow(clippy::module_inception)]
 use async_channel::unbounded;
+use network_helpers_sv2::IrohNodeManager;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -75,6 +76,23 @@ impl TranslatorSv2 {
 
         debug!("Channels initialized.");
 
+        // Initialize Iroh node manager if configured
+        let iroh_manager = if let Some(iroh_config) = self.config.iroh_node_config() {
+            info!("Initializing Iroh node manager for Translator");
+            match IrohNodeManager::new(iroh_config).await {
+                Ok(manager) => {
+                    info!("Iroh node initialized with Node ID: {}", manager.node_id());
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize Iroh node manager, will use TCP only: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let upstream_addresses = self
             .config
             .upstreams
@@ -82,7 +100,14 @@ impl TranslatorSv2 {
             .map(|upstream| {
                 let upstream_addr =
                     SocketAddr::new(upstream.address.parse().unwrap(), upstream.port);
-                (upstream_addr, upstream.authority_pubkey)
+                let iroh_node_id = upstream.iroh_node_id.as_ref().and_then(|s| {
+                    s.parse::<iroh::NodeId>().ok()
+                });
+                sv2::upstream::UpstreamConnectionInfo {
+                    address: upstream_addr,
+                    authority_pubkey: upstream.authority_pubkey,
+                    iroh_node_id,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -92,6 +117,7 @@ impl TranslatorSv2 {
             channel_manager_to_upstream_receiver.clone(),
             notify_shutdown.clone(),
             shutdown_complete_tx.clone(),
+            iroh_manager.clone(),
         )
         .await
         {
@@ -189,6 +215,7 @@ impl TranslatorSv2 {
                                         channel_manager_to_upstream_receiver.clone(),
                                         notify_shutdown_clone.clone(),
                                         shutdown_complete_tx_clone.clone(),
+                                        iroh_manager.clone(),
                                     ).await {
                                         Ok(upstream) => {
                                             if let Err(e) = upstream

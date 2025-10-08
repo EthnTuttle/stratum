@@ -6,8 +6,9 @@ use crate::{
     utils::{message_from_frame, ShutdownMessage},
 };
 use async_channel::{Receiver, Sender};
+use iroh::NodeId;
 use key_utils::Secp256k1PublicKey;
-use network_helpers_sv2::noise_connection::Connection;
+use network_helpers_sv2::{noise_connection::Connection, IrohConnection, IrohNodeManager};
 use std::{net::SocketAddr, sync::Arc};
 use stratum_common::roles_logic_sv2::{
     codec_sv2::{
@@ -30,6 +31,14 @@ pub type Message = AnyMessage<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
 /// Type alias for either handshake or SV2 frames
 pub type EitherFrame = StandardEitherFrame<Message>;
+
+/// Represents upstream connection information including optional Iroh support
+#[derive(Clone, Debug)]
+pub struct UpstreamConnectionInfo {
+    pub address: SocketAddr,
+    pub authority_pubkey: Secp256k1PublicKey,
+    pub iroh_node_id: Option<NodeId>,
+}
 
 /// Manages the upstream SV2 connection to a mining pool or proxy.
 ///
@@ -57,26 +66,31 @@ impl Upstream {
     /// to connect to each server multiple times before giving up.
     ///
     /// # Arguments
-    /// * `upstreams` - List of (address, public_key) pairs for upstream servers
+    /// * `upstreams` - List of upstream connection info including optional Iroh NodeIds
     /// * `channel_manager_sender` - Channel to send messages to the channel manager
     /// * `channel_manager_receiver` - Channel to receive messages from the channel manager
     /// * `notify_shutdown` - Broadcast channel for shutdown coordination
     /// * `shutdown_complete_tx` - Channel to signal shutdown completion
+    /// * `iroh_manager` - Optional Iroh node manager for Iroh connections
     ///
     /// # Returns
     /// * `Ok(Upstream)` - Successfully connected to an upstream server
     /// * `Err(TproxyError)` - Failed to connect to any upstream server
     pub async fn new(
-        upstreams: &[(SocketAddr, Secp256k1PublicKey)],
+        upstreams: &[UpstreamConnectionInfo],
         channel_manager_sender: Sender<EitherFrame>,
         channel_manager_receiver: Receiver<EitherFrame>,
         notify_shutdown: broadcast::Sender<ShutdownMessage>,
         shutdown_complete_tx: mpsc::Sender<()>,
+        iroh_manager: Option<Arc<IrohNodeManager>>,
     ) -> Result<Self, TproxyError> {
         let mut shutdown_rx = notify_shutdown.subscribe();
         const RETRIES_PER_UPSTREAM: u8 = 3;
 
-        for (index, (addr, pubkey)) in upstreams.iter().enumerate() {
+        for (index, upstream_info) in upstreams.iter().enumerate() {
+            let addr = upstream_info.address;
+            let pubkey = upstream_info.authority_pubkey;
+
             info!("Trying to connect to upstream {} at {}", index, addr);
 
             for attempt in 1..=RETRIES_PER_UPSTREAM {
@@ -86,6 +100,46 @@ impl Upstream {
                     return Err(TproxyError::Shutdown);
                 }
 
+                // Try Iroh first if configured
+                if let (Some(node_id), Some(iroh_mgr)) = (upstream_info.iroh_node_id, iroh_manager.as_ref()) {
+                    info!("Attempting Iroh connection to upstream {} at NodeID: {}", index, node_id);
+                    match iroh_mgr.endpoint().connect(node_id, &iroh_mgr.config().alpn).await {
+                        Ok(connection) => {
+                            match connection.open_bi().await {
+                                Ok((send_stream, recv_stream)) => {
+                                    info!("Iroh connection established with upstream {index}");
+                                    let initiator = Initiator::from_raw_k(pubkey.into_bytes())?;
+                                    match IrohConnection::new(send_stream, recv_stream, HandshakeRole::Initiator(initiator)).await {
+                                        Ok((receiver, sender)) => {
+                                            let upstream_channel_state = UpstreamChannelState::new(
+                                                channel_manager_sender,
+                                                channel_manager_receiver,
+                                                receiver,
+                                                sender,
+                                            );
+                                            debug!("Successfully initialized upstream channel via Iroh with {addr}");
+
+                                            return Ok(Self {
+                                                upstream_channel_state,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed Iroh Noise handshake with {addr}: {e:?}. Falling back to TCP...");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to open Iroh bi-directional stream: {e:?}. Falling back to TCP...");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to connect via Iroh: {e:?}. Falling back to TCP...");
+                        }
+                    }
+                }
+
+                // Fall back to TCP (or use TCP if Iroh not configured)
                 match TcpStream::connect(addr).await {
                     Ok(socket) => {
                         info!(

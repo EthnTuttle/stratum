@@ -38,7 +38,10 @@ use std::{
     time::Duration,
 };
 use stratum_common::{
-    network_helpers_sv2::noise_connection::Connection,
+    network_helpers_sv2::{
+        noise_connection::Connection,
+        IrohNodeManager,
+    },
     roles_logic_sv2::{
         self,
         bitcoin::{Amount, TxOut},
@@ -418,6 +421,70 @@ pub fn verify_token(
 }
 
 impl Pool {
+    /// Starts accepting incoming connections over Iroh network.
+    ///
+    /// Runs in a loop, accepting connections from the Iroh node manager, and then
+    /// calling `Pool::accept_incoming_connection_` to handle the SV2 setup and downstream
+    /// creation for each successful connection.
+    async fn accept_incoming_iroh_connection(
+        self_: Arc<Mutex<Pool>>,
+        config: PoolConfig,
+        iroh_manager: Arc<IrohNodeManager>,
+        mut recv_stop_signal: tokio::sync::watch::Receiver<()>,
+        shares_per_minute: f32,
+    ) -> PoolResult<()> {
+        info!("Pool is listening for Iroh connections on Node ID: {}", iroh_manager.node_id());
+
+        // Spawn the main accept loop in a separate task
+        task::spawn(async move {
+            loop {
+                tokio::select! {
+                    // Listen for the shutdown signal
+                    _ = recv_stop_signal.changed() => {
+                        info!("Pool is stopping Iroh server after stop shutdown signal received");
+                        break;
+                    },
+                    // Accept new incoming Iroh connections
+                    result = iroh_manager.accept_connection::<Message>(
+                        HandshakeRole::Responder(
+                            Responder::from_authority_kp(
+                                &config.authority_public_key().into_bytes(),
+                                &config.authority_secret_key().into_bytes(),
+                                std::time::Duration::from_secs(config.cert_validity_sec()),
+                            ).unwrap()
+                        )
+                    ) => {
+                        match result {
+                            Ok((receiver, sender)) => {
+                                // Note: Iroh doesn't expose the remote address in the same way TCP does
+                                // We use a placeholder address for now
+                                let address = "0.0.0.0:0".parse().unwrap();
+                                info!("Accepted new Iroh connection");
+
+                                let res = Self::accept_incoming_connection_(
+                                    self_.clone(),
+                                    receiver,
+                                    sender,
+                                    address,
+                                    shares_per_minute,
+                                    config.coinbase_reward_script().clone()
+                                ).await;
+
+                                if let Err(e) = res {
+                                    error!("Error handling Iroh connection: {:?}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error accepting Iroh connection: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
     /// Binds to the configured listen address and starts accepting incoming TCP connections.
     ///
     /// Runs in a loop, accepting connections, performing the Noise handshake, and then
@@ -1047,22 +1114,75 @@ impl Pool {
         let cloned3 = pool.clone();
 
         info!("Starting up Pool server");
+
+        // Initialize Iroh node manager if configured
+        let iroh_manager = if let Some(iroh_config) = config.iroh_node_config() {
+            info!("Initializing Iroh node manager for pool");
+            match IrohNodeManager::new(iroh_config).await {
+                Ok(manager) => {
+                    info!("Iroh node initialized with Node ID: {}", manager.node_id());
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    error!("Failed to initialize Iroh node manager: {:?}", e);
+                    let _ = status_tx
+                        .send(status::Status {
+                            state: status::State::DownstreamShutdown(PoolError::ComponentShutdown(
+                                format!("Failed to initialize Iroh node: {:?}", e),
+                            )),
+                        })
+                        .await;
+                    return Err(PoolError::Custom(format!("Failed to initialize Iroh node: {:?}", e)));
+                }
+            }
+        } else {
+            None
+        };
+
         let status_tx_clone = status_tx.clone();
-        // Task to handle multiple downstream connection.
+        // Task to handle multiple downstream TCP connections
         if let Err(e) =
-            Self::accept_incoming_connection(cloned, config, recv_stop_signal, shares_per_minute)
+            Self::accept_incoming_connection(cloned.clone(), config.clone(), recv_stop_signal.clone(), shares_per_minute)
                 .await
         {
-            error!("Pool stopped accepting connections due to: {}", &e);
+            error!("Pool stopped accepting TCP connections due to: {}", &e);
             let _ = status_tx_clone
                 .send(status::Status {
                     state: status::State::DownstreamShutdown(PoolError::ComponentShutdown(
-                        "Pool stopped accepting connections".to_string(),
+                        "Pool stopped accepting TCP connections".to_string(),
                     )),
                 })
                 .await;
 
             return Err(e);
+        }
+
+        // Start Iroh connection listener if configured
+        if let Some(iroh_mgr) = iroh_manager {
+            let cloned_iroh = cloned.clone();
+            let config_clone = config.clone();
+            let status_tx_clone = status_tx.clone();
+
+            if let Err(e) = Self::accept_incoming_iroh_connection(
+                cloned_iroh,
+                config_clone,
+                iroh_mgr,
+                recv_stop_signal.clone(),
+                shares_per_minute,
+            )
+            .await
+            {
+                error!("Pool stopped accepting Iroh connections due to: {}", &e);
+                let _ = status_tx_clone
+                    .send(status::Status {
+                        state: status::State::DownstreamShutdown(PoolError::ComponentShutdown(
+                            "Pool stopped accepting Iroh connections".to_string(),
+                        )),
+                    })
+                    .await;
+                // Don't return error here, TCP listener is still running
+                warn!("Iroh listener failed but continuing with TCP listener");
+            }
         }
 
         let cloned = sender_message_received_signal.clone();
