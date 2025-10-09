@@ -1,0 +1,39 @@
+# Translator config with Iroh network support
+# Translator accepts SV1 connections from miners and connects to Pool via Iroh
+
+# Downstream SV1 listening
+downstream_address = "0.0.0.0:34255"
+downstream_port = 34255
+
+# Upstream SV2 configuration
+upstream_address = "127.0.0.1"
+upstream_port = 34254
+upstream_authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+
+# Iroh node configuration for upstream SV2 connections
+[iroh_node_config]
+secret_key_path = "/tmp/translator-iroh-secret"
+relay_mode = "default"
+# Use SV2 mining protocol ALPN for upstream Pool connections
+alpn_protocol = "mining"
+
+# Upstream configuration with Iroh NodeID
+# NOTE: The upstream_iroh_node_id field will need to be filled in after starting
+# the Pool, as it will be discovered via mDNS
+[[upstreams]]
+address = "127.0.0.1"
+port = 34254
+authority_pubkey = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+# Uncomment and fill with Pool's NodeID after it starts:
+# iroh_node_id = "<POOL_NODE_ID_HERE>"
+
+# Difficulty management
+downstream_difficulty_config = { min_individual_miner_hashrate = 50.0, shares_per_minute = 4.0 }
+
+# Channel nominal hashrate
+channel_nominal_hashrate = 5000000.0
+
+# Retry settings
+max_supported_version = 2
+min_supported_version = 2
+min_extranonce2_size = 8

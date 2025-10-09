@@ -1,0 +1,28 @@
+# Job Declarator Server config with Iroh network support
+# JDS accepts connections from JD Clients over both TCP and Iroh
+
+authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
+cert_validity_sec = 3600
+
+# TCP listening address (for JD Clients)
+listen_jd_address = "0.0.0.0:34255"
+
+# Iroh node configuration for accepting JDC connections
+[iroh_node_config]
+secret_key_path = "/tmp/jds-iroh-secret"
+relay_mode = "default"
+# Use Job Declarator ALPN
+alpn_protocol = "jd"
+
+# Pool address will be read by connecting JD Clients
+core_rpc_url = "http://127.0.0.1:18443"
+core_rpc_user = "user"
+core_rpc_pass = "password"
+
+# Full template mode (client must provide custom coinbase)
+full_template_mode_required = false
+
+# Mempool configuration
+mempool_update_interval_secs = 30
+min_tx_fee = 1000

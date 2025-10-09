@@ -1,0 +1,28 @@
+# Pool config with Iroh network support
+# This pool accepts connections from both TCP and Iroh
+
+authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
+cert_validity_sec = 3600
+
+# TCP listening address (for backwards compatibility)
+listen_address = "0.0.0.0:34254"
+
+# Iroh node configuration for accepting downstream connections
+[iroh_node_config]
+# Store the secret key for persistent identity across restarts
+secret_key_path = "/tmp/pool-iroh-secret"
+# Use default relay mode for NAT traversal
+relay_mode = "default"
+# Use SV2 mining protocol ALPN
+alpn_protocol = "mining"
+
+# Coinbase configuration
+coinbase_reward_script = "addr(tb1qa0sm0hxzj0x25rh8gw5xlzwlsfvvyz8u96w3p8)"
+server_id = 1
+pool_signature = "Stratum V2 SRI Pool (Iroh Test)"
+
+# Template Provider (using TCP for now)
+tp_address = "127.0.0.1:8442"
+shares_per_minute = 1.0
+share_batch_size = 10
