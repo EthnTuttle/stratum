@@ -461,18 +461,24 @@ impl Pool {
                                 let address = "0.0.0.0:0".parse().unwrap();
                                 info!("Accepted new Iroh connection");
 
-                                let res = Self::accept_incoming_connection_(
-                                    self_.clone(),
-                                    receiver,
-                                    sender,
-                                    address,
-                                    shares_per_minute,
-                                    config.coinbase_reward_script().clone()
-                                ).await;
+                                // Spawn a new task to handle this connection so the accept loop
+                                // can immediately continue accepting new connections
+                                let self_clone = self_.clone();
+                                let config_clone = config.clone();
+                                task::spawn(async move {
+                                    let res = Self::accept_incoming_connection_(
+                                        self_clone,
+                                        receiver,
+                                        sender,
+                                        address,
+                                        shares_per_minute,
+                                        config_clone.coinbase_reward_script().clone()
+                                    ).await;
 
-                                if let Err(e) = res {
-                                    error!("Error handling Iroh connection: {:?}", e);
-                                }
+                                    if let Err(e) = res {
+                                        error!("Error handling Iroh connection: {:?}", e);
+                                    }
+                                });
                             }
                             Err(e) => {
                                 error!("Error accepting Iroh connection: {:?}", e);

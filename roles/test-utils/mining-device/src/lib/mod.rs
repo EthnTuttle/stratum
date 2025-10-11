@@ -1,11 +1,13 @@
 #![allow(clippy::option_map_unit_fn)]
 use async_channel::{Receiver, Sender};
+use iroh::NodeId;
 use key_utils::Secp256k1PublicKey;
 use num_format::{Locale, ToFormattedString};
 use primitive_types::U256;
 use rand::{thread_rng, Rng};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -14,7 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 use stratum_common::{
-    network_helpers_sv2::noise_connection::Connection,
+    network_helpers_sv2::{
+        noise_connection::Connection, IrohConnection, IrohNodeConfig, IrohNodeManager,
+        StratumV2Alpn,
+    },
     roles_logic_sv2::{
         self,
         bitcoin::{blockdata::block::Header, hash_types::BlockHash, hashes::Hash, CompactTarget},
@@ -100,45 +105,127 @@ pub async fn connect(
     handicap: u32,
     nominal_hashrate_multiplier: Option<f32>,
     single_submit: bool,
+    pool_iroh_node_id: Option<NodeId>,
+    iroh_secret_key_path: Option<String>,
 ) {
-    let address = address
-        .clone()
-        .to_socket_addrs()
-        .expect("Invalid pool address, use one of this formats: ip:port, domain:port")
-        .next()
-        .expect("Invalid pool address, use one of this formats: ip:port, domain:port");
-    info!("Connecting to pool at {}", address);
-    let socket = loop {
-        let pool = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(address)).await;
-        match pool {
-            Ok(result) => match result {
-                Ok(socket) => break socket,
-                Err(e) => {
+    // Determine if we should use Iroh or TCP based on pool_iroh_node_id
+    let (receiver, sender, peer_addr) = if let Some(node_id) = pool_iroh_node_id {
+        // Iroh connection path
+        info!("Connecting to pool via Iroh network, node ID: {}", node_id);
+
+        // Configure Iroh node with optional persistent identity
+        let mut iroh_config = IrohNodeConfig::for_mining();
+        if let Some(key_path) = iroh_secret_key_path {
+            iroh_config.secret_key_path = Some(PathBuf::from(key_path));
+        }
+
+        // Initialize Iroh node
+        let iroh_manager = IrohNodeManager::new(iroh_config)
+            .await
+            .expect("Failed to initialize Iroh node");
+        info!("Iroh node initialized with ID: {}", iroh_manager.node_id());
+
+        // Connect to the pool's Iroh node
+        info!("Connecting to pool Iroh node...");
+        let connection = loop {
+            match tokio::time::timeout(
+                Duration::from_secs(30),
+                iroh_manager
+                    .endpoint()
+                    .connect(node_id, &StratumV2Alpn::Mining.to_vec()),
+            )
+            .await
+            {
+                Ok(Ok(conn)) => {
+                    info!("Iroh connection established to pool node {}", node_id);
+                    break conn;
+                }
+                Ok(Err(e)) => {
                     error!(
-                        "Failed to connect to Upstream role at {}, retrying in 5s: {}",
-                        address, e
+                        "Failed to connect to pool Iroh node {}, retrying in 5s: {}",
+                        node_id, e
                     );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-            },
-            Err(_) => {
-                error!("Pool is unresponsive, terminating");
+                Err(_) => {
+                    error!("Pool Iroh node connection timed out after 30s, terminating");
+                    std::process::exit(1);
+                }
+            }
+        };
+
+        // Open a bidirectional stream
+        info!("Opening bidirectional stream to pool...");
+        let (send_stream, recv_stream) = match connection.open_bi().await {
+            Ok(streams) => {
+                info!("Bidirectional stream opened successfully");
+                streams
+            }
+            Err(e) => {
+                error!("Failed to open bidirectional stream: {}", e);
                 std::process::exit(1);
             }
-        }
+        };
+
+        // Create Noise-encrypted connection over Iroh
+        let initiator = Initiator::new(pub_key.map(|e| e.0));
+        let (receiver, sender) = IrohConnection::new(
+            send_stream,
+            recv_stream,
+            codec_sv2::HandshakeRole::Initiator(initiator),
+        )
+        .await
+        .expect("Failed to establish Noise handshake over Iroh");
+
+        info!("Pool noise connection established over Iroh to {}", node_id);
+
+        // Use a dummy SocketAddr for Iroh connections (the actual addressing is via NodeId)
+        let dummy_addr = "0.0.0.0:0".parse::<SocketAddr>().unwrap();
+        (receiver, sender, dummy_addr)
+    } else {
+        // TCP connection path (existing behavior)
+        let address = address
+            .clone()
+            .to_socket_addrs()
+            .expect("Invalid pool address, use one of this formats: ip:port, domain:port")
+            .next()
+            .expect("Invalid pool address, use one of this formats: ip:port, domain:port");
+        info!("Connecting to pool at {}", address);
+        let socket = loop {
+            let pool =
+                tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(address)).await;
+            match pool {
+                Ok(result) => match result {
+                    Ok(socket) => break socket,
+                    Err(e) => {
+                        error!(
+                            "Failed to connect to Upstream role at {}, retrying in 5s: {}",
+                            address, e
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                },
+                Err(_) => {
+                    error!("Pool is unresponsive, terminating");
+                    std::process::exit(1);
+                }
+            }
+        };
+        info!("Pool tcp connection established at {}", address);
+        let peer_addr = socket.peer_addr().unwrap();
+        let initiator = Initiator::new(pub_key.map(|e| e.0));
+        let (receiver, sender) =
+            Connection::new(socket, codec_sv2::HandshakeRole::Initiator(initiator))
+                .await
+                .unwrap();
+        info!("Pool noise connection established at {}", address);
+        (receiver, sender, peer_addr)
     };
-    info!("Pool tcp connection established at {}", address);
-    let address = socket.peer_addr().unwrap();
-    let initiator = Initiator::new(pub_key.map(|e| e.0));
-    let (receiver, sender) =
-        Connection::new(socket, codec_sv2::HandshakeRole::Initiator(initiator))
-            .await
-            .unwrap();
-    info!("Pool noise connection established at {}", address);
+
     Device::start(
         receiver,
         sender,
-        address,
+        peer_addr,
         device_id,
         user_id,
         handicap,

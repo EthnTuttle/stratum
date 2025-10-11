@@ -1,6 +1,7 @@
 #![allow(special_module_name)]
 #![allow(clippy::option_map_unit_fn)]
 use key_utils::Secp256k1PublicKey;
+use iroh::NodeId;
 
 use clap::Parser;
 use tracing::info;
@@ -56,6 +57,16 @@ struct Args {
         help = "Number of worker threads to use for mining. Defaults to logical CPUs minus one (leaves one core free)."
     )]
     cores: Option<u32>,
+    #[arg(
+        long,
+        help = "Pool Iroh node ID (for connecting via Iroh network instead of TCP)"
+    )]
+    pool_iroh_node_id: Option<NodeId>,
+    #[arg(
+        long,
+        help = "Path to Iroh secret key file for persistent device identity"
+    )]
+    iroh_secret_key_path: Option<String>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -84,6 +95,8 @@ async fn main() {
         args.handicap,
         args.nominal_hashrate_multiplier,
         false,
+        args.pool_iroh_node_id,
+        args.iroh_secret_key_path,
     )
     .await;
 }
