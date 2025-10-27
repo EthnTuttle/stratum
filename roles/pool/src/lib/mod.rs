@@ -7,6 +7,8 @@ use stratum_apps::stratum_core::{
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
+use metrics_exporter::{MetricsProvider, MetricsServer};
+
 use crate::{
     channel_manager::ChannelManager,
     config::PoolConfig,
@@ -21,6 +23,7 @@ pub mod channel_manager;
 pub mod config;
 pub mod downstream;
 pub mod error;
+pub mod metrics_integration;
 pub mod status;
 pub mod task_manager;
 pub mod template_receiver;
@@ -79,6 +82,28 @@ impl PoolSv2 {
         .await?;
 
         let channel_manager_clone = channel_manager.clone();
+
+        // Start metrics server
+        let metrics_server = MetricsServer::new("0.0.0.0:9090".to_string());
+        let metrics_exporter = metrics_server.exporter();
+        let channel_manager_for_metrics = channel_manager.clone();
+
+        task_manager.spawn(async move {
+            // Spawn metrics HTTP server
+            tokio::spawn(async move {
+                if let Err(e) = metrics_server.start().await {
+                    warn!("Metrics server failed: {:?}", e);
+                }
+            });
+
+            // Periodically update metrics (every 5 seconds)
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let snapshot = channel_manager_for_metrics.get_metrics_snapshot();
+                metrics_exporter.update_from_pool_snapshot(&snapshot);
+            }
+        });
 
         // Initialize the template Receiver
         let tp_address = self.config.tp_address().to_string();

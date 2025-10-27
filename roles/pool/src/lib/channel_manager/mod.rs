@@ -51,7 +51,7 @@ pub const FULL_EXTRANONCE_SIZE: usize = POOL_ALLOCATION_BYTES + CLIENT_SEARCH_SP
 pub struct ChannelManagerData {
     // Mapping of `downstream_id` → `Downstream` object,
     // used by the channel manager to locate and interact with downstream clients.
-    downstream: HashMap<u32, Downstream>,
+    pub(crate) downstream: HashMap<u32, Downstream>,
     // Extranonce prefix factory for **extended downstream channels**.
     // Each new extended downstream receives a unique extranonce prefix.
     extranonce_prefix_factory_extended: ExtendedExtranonce,
@@ -66,9 +66,9 @@ pub struct ChannelManagerData {
     // Coinbase outputs
     coinbase_outputs: Vec<u8>,
     // Last new prevhash
-    last_new_prev_hash: Option<SetNewPrevHash<'static>>,
+    pub(crate) last_new_prev_hash: Option<SetNewPrevHash<'static>>,
     // Last future template
-    last_future_template: Option<NewTemplate<'static>>,
+    pub(crate) last_future_template: Option<NewTemplate<'static>>,
 }
 
 #[derive(Clone)]
@@ -84,7 +84,7 @@ pub struct ChannelManagerChannel {
 /// to perform message traversal.
 #[derive(Clone)]
 pub struct ChannelManager {
-    channel_manager_data: Arc<Mutex<ChannelManagerData>>,
+    pub(crate) channel_manager_data: Arc<Mutex<ChannelManagerData>>,
     channel_manager_channel: ChannelManagerChannel,
     pool_tag_string: String,
     share_batch_size: usize,

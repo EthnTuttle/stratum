@@ -8,7 +8,7 @@ members = [
     "jd-client",
     "jd-server",
     "stratum-apps"
-]
+, "metrics-exporter", "ratzilla-dashboard"]
 
 [profile.dev]
 # Required by super_safe_lock
